@@ -62,6 +62,25 @@ Replay начинается с25; полный cold start index1…24 этой �
 содержит статические device ARM64 и Simulator ARM64 archives; x86_64 Simulator
 не поставляется.
 
+### Portable rebuild helper
+
+`rebuild.py` is retained from the earlier public CGM branch (`63dc4a9`). It builds
+the current `Source/*.kt` with pinned Kotlin/Native 2.4.21 and JDK 21.0.13+9,
+verifies toolchain download hashes, uses relative source paths and checks the
+result for absolute build paths. It refuses to overwrite an existing output.
+
+```sh
+python3 Vendor/GS1Native/rebuild.py --help
+python3 Vendor/GS1Native/rebuild.py --output Vendor/GS1Native/build/portable/GS1Native.xcframework
+python3 -m unittest discover -s Vendor/GS1Native/Tests -p 'test_rebuild.py'
+```
+
+This helper downloads toolchains only when explicitly run without existing pinned
+installations. It does not sign, install or connect to a sensor. The supplied
+frameworks were retained unchanged during the 7.2.1 sync; they were not rebuilt
+with this helper. A replacement still requires native parity checks and provenance
+updates. The original source-archive recipe below remains available for audit.
+
 Для пересборки сначала проверить и распаковать committed source-only archive.
 Следующие команды запускаются из корня репозитория:
 

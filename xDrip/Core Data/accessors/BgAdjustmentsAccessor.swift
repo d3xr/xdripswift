@@ -67,7 +67,7 @@ class BgAdjustmentsAccessor {
         fetchRequest.predicate = NSCompoundPredicate(type: .and, subpredicates: [
             NSPredicate(format: "sourceContextIdentifier == %@", sourceContextIdentifier),
             NSPredicate(format: "isEnabled == %@", NSNumber(value: true)),
-            NSPredicate(format: "applyFromTimeStamp <= %@", NSDate(timeIntervalSince1970: readingTimeStamp.timeIntervalSince1970))
+            NSPredicate(format: "applyFromTimeStamp <= %@", readingTimeStamp as NSDate)
         ])
         
         var bgAdjustments = [BgAdjustment]()
@@ -111,7 +111,7 @@ class BgAdjustmentsAccessor {
         fetchRequest.predicate = NSCompoundPredicate(type: .and, subpredicates: [
             NSPredicate(format: "sourceContextIdentifier == %@", sourceContextIdentifier),
             NSPredicate(format: "isEnabled == %@", NSNumber(value: true)),
-            NSPredicate(format: "applyFromTimeStamp >= %@", NSDate(timeIntervalSince1970: applyFromTimeStamp.timeIntervalSince1970))
+            NSPredicate(format: "applyFromTimeStamp >= %@", applyFromTimeStamp as NSDate)
         ])
 
         managedObjectContext.performAndWait {

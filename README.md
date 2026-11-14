@@ -2,9 +2,9 @@
 
 [Русская версия](README.ru.md) · [Branches and upstream baseline](docs/branches.md)
 
-Custom **xDrip4iOS 7.2.0 / build 4246**, integrating Ottai CN/Global/Syai, Sibionics GS1 CN, AiDex/LinX/LumiFlex and ordinary glucose sharing with Trio. This is an iOS project; it does not use the Android xDrip+ codebase or Android signing keystores.
+Custom **xDrip4iOS 7.2.1 / build 4247**, integrating Ottai CN/Global/Syai, Sibionics GS1 CN, AiDex/LinX/LumiFlex and ordinary glucose sharing with Trio. This is an iOS project; it does not use the Android xDrip+ codebase or Android signing keystores.
 
-Use **`custom-build`**, the default branch, for the complete integration. Other branches contain upstream snapshots, individual patches or historical experiments; they are not interchangeable builds.
+Use **`custom-build`**, the default branch, for the complete integration. The other four branches track upstream or preserve heads of open upstream pull requests. Eleven obsolete remote branches have been retired; see the branch guide.
 
 ## Features and verification limits
 
@@ -42,13 +42,14 @@ For a Personal Team, copy `docs/signing/PersonalTeam.entitlements.example` to th
 
 ## Branches and baseline
 
-The integration is based on [upstream xDrip4iOS 7.2.0 / 4234, `ba37f261`](https://github.com/JohanDegraeve/xdripswift/tree/ba37f261352eedfb7f518c4a38e2266acb0f95e9). Ottai/Syai derives from [PR #736](https://github.com/JohanDegraeve/xdripswift/pull/736); AiDex/LinX/LumiFlex derives from [PR #740](https://github.com/JohanDegraeve/xdripswift/pull/740). GS1 uses the pinned community native core and corresponding source included in `Vendor/GS1Native`.
+The integration includes upstream **xDrip4iOS 7.2.1 / 4235** through [`f7447f1`](https://github.com/JohanDegraeve/xdripswift/tree/f7447f1c70a194cee1c9c8eea96ebbadf62027b8). Our custom build number is **4247**. The original custom snapshot was based on 7.2.0 / 4234; the 13 subsequent upstream commits are now merged, including alarm-interruption recovery, expiry-reminder rearming, Live Activity renewal and adjustment guardrails.
 
-As checked on November 14, 2026, upstream 7.2.1 / 4235 is 13 commits ahead of this base, including alarm, expiry-reminder and Live Activity fixes. Those upstream changes are **not yet integrated** here. Updating this integration requires a reviewed merge or port with regression checks; selecting an older feature branch does not provide the update. See the [branch guide](docs/branches.md).
+Ottai/Syai derives from [PR #736](https://github.com/JohanDegraeve/xdripswift/pull/736); AiDex/LinX/LumiFlex derives from [PR #740](https://github.com/JohanDegraeve/xdripswift/pull/740). GS1 uses the pinned community native core and corresponding source included in `Vendor/GS1Native`. [Sync details and retained branch work](docs/upstream-sync-7.2.1.md) describe the integration boundaries and the portable GS1 rebuild helper recovered from the retired combined-CGM branch.
 
 ## Documentation
 
-- [Branch guide and upstream comparison](docs/branches.md) — English.
+- [Branch guide and retained pull requests](docs/branches.md) — English.
+- [7.2.1 sync and branch audit](docs/upstream-sync-7.2.1.md) — English.
 - [Full technical handoff, sensor flows and build instructions](docs/developer-handoff-4246.md) — Russian.
 - [Files changed in the last 4246 implementation stage](docs/changes-4246.md) — Russian; not the full diff from upstream.
 - [Full and Personal Team signing profiles](docs/build-profiles.md) — Russian.
@@ -59,7 +60,9 @@ As checked on November 14, 2026, upstream 7.2.1 / 4235 is 13 commits ahead of th
 
 ## Tests and evidence
 
-On the clean public snapshot, **312 targeted XCTest cases passed and one private GS1 replay case was skipped**, with no failures. The skipped test requires personal input deliberately excluded from the repository. The prepared private test environment previously passed all 313 cases, including 43 new tests. These are selected suites, not the complete upstream test suite. An unsigned iPhone Release build also succeeded.
+The 7.2.1 sync regression run selected **626 XCTest cases: 624 passed, one private GS1 replay case was skipped, and one upstream Libre3 diagnostic-log test failed**. The same Libre3 failure was reproduced in unmodified upstream 7.2.1 on the same Simulator/SDK. The new CGM adjustment and fractional-date regressions passed, along with the selected CGM, migration, alarm and expiry tests. Five Python safety tests for the optional rebuild helper also passed. This is not the complete upstream test suite; see [verification details](docs/upstream-sync-7.2.1.md#verification-scope).
+
+The skipped replay case requires personal input deliberately excluded from the repository. The previous 4246 prepared test environment passed all 313 selected cases, including 43 tests added at that implementation stage.
 
 Simulator tests and synthetic HTTP/transport ports verify software behavior. They do not establish real BLE/NFC behavior, first physical activation, measurement accuracy or firmware lifetime extension. ACK, duration read-back and fresh measurements after the previous deadline are separate evidence levels.
 

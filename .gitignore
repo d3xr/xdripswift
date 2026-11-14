@@ -131,3 +131,7 @@ commit.txt
 
 # Compiler cache artifacts
 *.pch
+
+# Python helper bytecode
+__pycache__/
+*.py[cod]

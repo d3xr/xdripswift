@@ -1,5 +1,7 @@
 # xDrip+ 4246: техническая передача разработчикам
 
+Current release: **7.2.1 / 4247**. [Upstream sync and branch audit](upstream-sync-7.2.1.md). The 4246 details below remain the historical implementation reference.
+
 Дата: 14.11.2026. Версия: 7.2.0 / 4246. Код опубликован одним снимком в ветке `custom-build`; [состав и происхождение снимка](public-snapshot.md). Программные проверки и аппаратные свидетельства ниже разделены.
 
 Навигация: [README](../README.md), [все изменённые файлы](changes-4246.md), [профили подписи](build-profiles.md), [Ottai](ottai-activation.md), [GS1 Native](../Vendor/GS1Native/README.md).

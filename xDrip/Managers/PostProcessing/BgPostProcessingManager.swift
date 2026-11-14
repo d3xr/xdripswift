@@ -372,6 +372,8 @@ class BgPostProcessingManager {
         // or a different follower stream. Reset the entire editing state so any
         // new source starts from neutral values and disabled post processing.
         UserDefaults.standard.enableAdjustment = false
+        UserDefaults.standard.enableGlucoseAdjustment = false
+        UserDefaults.standard.enableCurveAdjustment = false
         updateSmoothingSettings(enableSmoothing: false, useFiveMinuteReadings: ConstantsBgSmoothing.defaultUseFiveMinuteReadings, smoothingPeriodInMinutes: ConstantsBgSmoothing.defaultSmoothingPeriodInMinutes, smoothingStrength: ConstantsBgSmoothing.defaultSmoothingStrength, smoothingAlgorithm: ConstantsBgSmoothing.defaultSmoothingAlgorithm)
         UserDefaults.standard.fiveMinuteReadingsStartTimeStamp = nil
         UserDefaults.standard.postProcessingStartTimeStamp = sourceHistoryStartTimeStamp()
@@ -450,6 +452,17 @@ class BgPostProcessingManager {
         )
     }
 
+    private func recordPostProcessingWarningAcknowledgement(_ feature: TroubleshootingPostProcessingWarning) {
+        trace(
+            "User acknowledged the %{public}@ warning and applied the setting.",
+            log: log,
+            category: ConstantsLog.categoryApplicationDataBgReadings,
+            type: .info,
+            troubleshooting: .standard(.configuration(.postProcessingWarningAcknowledged(feature))),
+            feature.name
+        )
+    }
+
     /// store the current smoothing settings and immediately reprocess the latest readings
     func updateSmoothing(enableSmoothing: Bool, useFiveMinuteReadings: Bool, smoothingPeriodInMinutes: Int, smoothingStrength: Int, smoothingAlgorithm: BgSmoothingAlgorithm = UserDefaults.standard.bgSmoothingAlgorithm) {
         let previousTroubleshootingSettings = troubleshootingPostProcessingSettings()
@@ -467,7 +480,20 @@ class BgPostProcessingManager {
         notifyBgPostProcessingDidUpdate()
     }
 
-    func applyPostProcessing(enableAdjustment: Bool, slope: Double?, intercept: Double?, adjustmentShapeType: BgAdjustmentShapeType, applyFromTimeStamp: Date, isBasicAdjustment: Bool, enteredBgValue: Double?, sourceCalculatedValue: Double?, enableSmoothing: Bool, useFiveMinuteReadings: Bool, smoothingPeriodInMinutes: Int, smoothingStrength: Int, smoothingAlgorithm: BgSmoothingAlgorithm = UserDefaults.standard.bgSmoothingAlgorithm, processingStartDateOverride: Date? = nil, troubleshootingApplyRange: TroubleshootingPostProcessingApplyRange = .now) {
+    @discardableResult
+    func applyPostProcessing(enableGlucoseAdjustment: Bool, enableCurveAdjustment: Bool, slope: Double?, intercept: Double?, adjustmentShapeType: BgAdjustmentShapeType, applyFromTimeStamp: Date, isBasicAdjustment: Bool, enteredBgValue: Double?, sourceCalculatedValue: Double?, enableSmoothing: Bool, useFiveMinuteReadings: Bool, smoothingPeriodInMinutes: Int, smoothingStrength: Int, smoothingAlgorithm: BgSmoothingAlgorithm = UserDefaults.standard.bgSmoothingAlgorithm, processingStartDateOverride: Date? = nil, troubleshootingApplyRange: TroubleshootingPostProcessingApplyRange = .now, acknowledgedWarnings: [TroubleshootingPostProcessingWarning] = []) -> Bool {
+        let allowsAdjustment = shouldAllowBgAdjustmentForCurrentSource()
+        let enableAdjustment = allowsAdjustment && (enableGlucoseAdjustment || enableCurveAdjustment)
+        let slope = enableCurveAdjustment ? slope : 1.0
+        let intercept = enableGlucoseAdjustment ? intercept : 0.0
+
+        // Reject the complete Apply operation before changing settings, history or downstream data.
+        if enableAdjustment {
+            guard let slope, slope.isFinite,
+                  (ConstantsBgAdjustment.minimumSlopeValue...ConstantsBgAdjustment.maximumSlopeValue).contains(slope),
+                  let intercept, ConstantsBgAdjustment.isValidOffset(intercept),
+                  currentSourceContextIdentifier() != nil else { return false }
+        }
         trace("%{public}@", log: log, category: ConstantsLog.categoryApplicationDataBgReadings, type: .info, applyPostProcessingDescription(enableAdjustment: enableAdjustment, slope: slope, intercept: intercept, adjustmentShapeType: adjustmentShapeType, applyFromTimeStamp: applyFromTimeStamp, enteredBgValue: enteredBgValue, sourceCalculatedValue: sourceCalculatedValue, enableSmoothing: enableSmoothing, useFiveMinuteReadings: useFiveMinuteReadings, smoothingStrength: smoothingStrength, smoothingAlgorithm: smoothingAlgorithm, processingStartDateOverride: processingStartDateOverride))
 
         if enableAdjustment, let slope = slope, let intercept = intercept {
@@ -475,6 +501,9 @@ class BgPostProcessingManager {
         } else {
             disableCurrentAdjustment()
         }
+
+        UserDefaults.standard.enableGlucoseAdjustment = allowsAdjustment && enableGlucoseAdjustment
+        UserDefaults.standard.enableCurveAdjustment = allowsAdjustment && enableCurveAdjustment
 
         let rewriteStartDate = processingStartDateOverride ?? applyFromTimeStamp
         if UserDefaults.standard.useFiveMinuteReadings != useFiveMinuteReadings || processingStartDateOverride != nil {
@@ -490,6 +519,19 @@ class BgPostProcessingManager {
 
         updateSmoothingSettings(enableSmoothing: enableSmoothing, useFiveMinuteReadings: useFiveMinuteReadings, smoothingPeriodInMinutes: smoothingPeriodInMinutes, smoothingStrength: smoothingStrength, smoothingAlgorithm: smoothingAlgorithm)
 
+        for warning in acknowledgedWarnings {
+            switch warning {
+            case .glucoseAdjustment where allowsAdjustment && enableGlucoseAdjustment:
+                recordPostProcessingWarningAcknowledgement(warning)
+            case .curveAdjustment where allowsAdjustment && enableCurveAdjustment:
+                recordPostProcessingWarningAcknowledgement(warning)
+            case .glucoseSmoothing where enableSmoothing:
+                recordPostProcessingWarningAcknowledgement(warning)
+            default:
+                break
+            }
+        }
+
         // Treat Apply as one user action. The Activity Log receives the complete resulting state,
         // never three inferred statements about which individual toggles the user did or did not
         // touch. The semantic range comes directly from the selected UI option, so delayed follower
@@ -502,6 +544,7 @@ class BgPostProcessingManager {
         replacePostProcessingNote(enableAdjustment: enableAdjustment, slope: slope, intercept: intercept, adjustmentShapeType: adjustmentShapeType, applyFromTimeStamp: applyFromTimeStamp, enableSmoothing: enableSmoothing, useFiveMinuteReadings: useFiveMinuteReadings, smoothingStrength: smoothingStrength, noteWindowStartDate: rewriteStartDate)
 
         notifyBgPostProcessingDidUpdate()
+        return true
     }
 
     func currentSourceDescriptionForPostProcessing() -> String? {
@@ -850,6 +893,8 @@ class BgPostProcessingManager {
     private func disableCurrentAdjustment() {
         guard let sourceContextIdentifier = currentSourceContextIdentifier() else {
             UserDefaults.standard.enableAdjustment = false
+            UserDefaults.standard.enableGlucoseAdjustment = false
+            UserDefaults.standard.enableCurveAdjustment = false
             return
         }
 
@@ -859,6 +904,8 @@ class BgPostProcessingManager {
         }
 
         UserDefaults.standard.enableAdjustment = false
+        UserDefaults.standard.enableGlucoseAdjustment = false
+        UserDefaults.standard.enableCurveAdjustment = false
     }
 
     private func updateSmoothingSettings(enableSmoothing: Bool, useFiveMinuteReadings: Bool, smoothingPeriodInMinutes: Int, smoothingStrength: Int, smoothingAlgorithm: BgSmoothingAlgorithm) {

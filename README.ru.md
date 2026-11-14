@@ -2,9 +2,9 @@
 
 [English](README.md)
 
-[Назначение всех веток и сравнение с upstream](docs/branches.md). На 14.11.2026 официальный upstream уже имеет 7.2.1 / 4235, на 13 коммитов новее нашей базы. Эти исправления ещё не перенесены; обновлять следует `custom-build`, сохраняя интеграции.
+[Назначение оставшихся веток](docs/branches.md). В сборку4247 включён upstream7.2.1/4235 f7447f1: все13 новых commits интегрированы. [Синхронизация и аудит удалённых веток](docs/upstream-sync-7.2.1.md).
 
-Интеграционная сборка **xDrip4iOS 7.2.0 / 4246** с Ottai CN/Global/Syai, Sibionics GS1 CN, AiDex/LinX/LumiFlex и передачей штатной глюкозы в Trio. Это iOS-проект; он не является Android xDrip+ и не использует Android keystore.
+Интеграционная сборка **xDrip4iOS 7.2.1 / 4247** с Ottai CN/Global/Syai, Sibionics GS1 CN, AiDex/LinX/LumiFlex и передачей штатной глюкозы в Trio. Это iOS-проект; он не является Android xDrip+ и не использует Android keystore.
 
 Исходная upstream-база: [JohanDegraeve/xdripswift@ba37f261](https://github.com/JohanDegraeve/xdripswift/tree/ba37f261352eedfb7f518c4a38e2266acb0f95e9), 7.2.0 / 4234. В этой базе перечисленных дополнительных семейств нет. Ottai/Syai основан на [PR736](https://github.com/JohanDegraeve/xdripswift/pull/736); AiDex/LinX/LumiFlex — отдельная интеграция из [PR740](https://github.com/JohanDegraeve/xdripswift/pull/740). Остальные upstream-источники CGM и функции приложения сохранены.
 
@@ -55,7 +55,9 @@ bash scripts/build-local.sh
 
 ## Проверки и ограничения
 
-На реализации 4246 выполнены **313 целевых XCTest** без ошибок в подготовленном окружении, включая 43 новых теста. На чистом checkout один тест личного GS1 replay ожидаемо пропускается: его приватные входные данные не входят в репозиторий. Это не результат полного upstream suite. Подробности и воспроизводимые команды — в [технической передаче](docs/developer-handoff-4246.md#проверки).
+Для синхронизации7.2.1 выполнены626 целевых XCTest:624 прошли,1 private GS1 replay пропущен без личного input,1 тест журнала Libre3 падает так же на неизменённом upstream. Все новые тесты коррекции/дробных дат и выбранные CGM/migration/alarm/expiry проверки прошли. Дополнительно прошли5 Python-тестов rebuild helper. Это не полный upstream suite. [Точная область и известное расхождение](docs/upstream-sync-7.2.1.md#verification-scope).
+
+В подготовленном окружении предыдущей4246 проходили313 целевых XCTest, включая43 теста того этапа.
 
 Simulator, synthetic HTTP и transport seams проверяют программную логику. Они не подтверждают реальный Bluetooth/NFC, новую физическую активацию, точность или продление firmware. Чтение истории, ACK, read-back срока и новые измерения после прежнего deadline — разные уровни подтверждения.
 
