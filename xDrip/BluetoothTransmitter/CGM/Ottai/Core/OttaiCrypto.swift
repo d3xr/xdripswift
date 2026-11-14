@@ -64,11 +64,13 @@ enum OttaiCrypto {
         return String(bytes: plain, encoding: .utf8)
     }
 
-    /// Encrypt text with AES ECB PKCS5 and return base64. Only used in tests.
+    #if DEBUG
+    /// Builds encrypted cloud fixtures without embedding captured account data.
     static func encryptCloudField(plaintext: String, fieldKey: String) -> String? {
         guard let out = aesECB(.encrypt, key: Array(fieldKey.utf8), data: Array(plaintext.utf8), pkcs7Padded: true) else { return nil }
         return Data(out).base64EncodedString()
     }
+    #endif
 
     /// Decrypt keyA. The time is produceTime.
     static func decryptKeyA(base64KeyA: String, glucoseSecretKey: String, produceTime: String, mac: String) -> String? {

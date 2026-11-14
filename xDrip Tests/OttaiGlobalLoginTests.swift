@@ -226,6 +226,33 @@ extension OttaiGlobalLoginTests {
         try work(OttaiRegistry.accountContext())
     }
 
+    func testSyaiRefreshCannotOverwriteAReplacementSession() {
+        withPreparationAccount(base: OttaiConstants.apiBaseSyai) { account in
+            XCTAssertTrue(OttaiRegistry.commitRefreshedSyaiSession(account, accessToken: "fixture-refreshed",
+                refreshToken: "fixture-refresh", glucoseSecretKey: nil))
+            XCTAssertEqual(OttaiRegistry.loadAccessToken(), "fixture-refreshed")
+            UserDefaults.standard.set(UUID().uuidString, forKey: "ottai_session_generation")
+            XCTAssertFalse(OttaiRegistry.commitRefreshedSyaiSession(account, accessToken: "fixture-stale",
+                refreshToken: "fixture-stale-refresh", glucoseSecretKey: "fixture-stale-secret"))
+            XCTAssertEqual(OttaiRegistry.loadAccessToken(), "fixture-refreshed")
+            XCTAssertEqual(OttaiRegistry.loadRefreshToken(), "fixture-refresh")
+            XCTAssertEqual(OttaiRegistry.loadGlucoseSecretKey(), preparationRoot)
+        }
+    }
+
+    func testSyaiPreparationRejectsStaleOwnerBeforeRunningAnyOperation() {
+        withPreparationAccount(base: OttaiConstants.apiBaseSyai) { account in
+            var calls = 0
+            let rejected: Bool? = OttaiSyaiClient.withPreparationContext(account, stillAuthorized: { false }) {
+                calls += 1
+                return true
+            }
+            XCTAssertNil(rejected)
+            XCTAssertEqual(calls, 0)
+            XCTAssertEqual(OttaiRegistry.loadAccessToken(), "fixture-native-token")
+        }
+    }
+
     private func preparationResponse(mac: String? = nil, firmware: String? = nil, invalidKeys: Bool = false) throws -> Reply {
         let mac = mac ?? preparationMAC
         let fieldTime: Int64 = 1_760_000_000_000

@@ -14,8 +14,11 @@
 
 import CryptoKit
 import Foundation
+import os
 
 enum OttaiCloudClient {
+
+    private static let log = OSLog(subsystem: ConstantsLog.subSystem, category: ConstantsLog.categoryCGMOttai)
 
     // The secret used to sign requests. The old endpoints and cgmAuth use MD5.
     private static let seed = "dy7234hbnrnfh7q89eru8ybfn899"
@@ -42,13 +45,49 @@ enum OttaiCloudClient {
         func contextualized(stage: String, origin: String = "") -> CloudFailure {
             var copy = self; copy.stage = stage; copy.origin = origin; return copy
         }
+        init(text: String, code: String = "", httpStatus: Int = 0, stage: String = "", origin: String = "") {
+            self.text = code.caseInsensitiveCompare("OTA_UPGRADE_REQUIRED") == .orderedSame
+                ? "The server has not finished sensor setup. Check the sensor in the official app. If it offers a firmware update, install it, then fetch the sensor again. (OTA_UPGRADE_REQUIRED)" : text
+            self.code = code
+            self.httpStatus = httpStatus
+            self.stage = stage
+            self.origin = origin
+        }
         var isTokenInvalid: Bool { code.caseInsensitiveCompare("AuthFailed_TokenInvalid") == .orderedSame }
         var requiresSignIn: Bool { httpStatus == 401 || code == "401" || isTokenInvalid || code == "AuthFailed_LoginElsewhere" }
     }
 
-    /// Why the last call failed (no secrets in it). Nil after a call that worked.
-    static var lastFailure: CloudFailure?
+    // The legacy synchronous helpers exchange errors through the calling thread.
+    // Never share this slot between concurrent upload, activation and UI operations.
+    private static let failureKey = "xdrip.ottai.cloud.operationFailure"
+    static var lastFailure: CloudFailure? {
+        get { Thread.current.threadDictionary[failureKey] as? CloudFailure }
+        set {
+            if let newValue = newValue { Thread.current.threadDictionary[failureKey] = newValue }
+            else { Thread.current.threadDictionary.removeObject(forKey: failureKey) }
+        }
+    }
     static var lastError: String { lastFailure?.displayText ?? "" }
+
+    struct OperationResult<Value> {
+        let value: Value
+        let failure: CloudFailure?
+        var errorText: String { failure?.displayText ?? "" }
+    }
+
+    /// Run a complete synchronous operation and carry its error with its value when
+    /// dispatching to another queue. Nested operations restore their caller's error.
+    static func perform<Value>(_ operation: () -> Value) -> OperationResult<Value> {
+        let previous = lastFailure
+        lastFailure = nil
+        defer { lastFailure = previous }
+        let value = operation()
+        return OperationResult(value: value, failure: lastFailure)
+    }
+
+    static func mobileAccessToken(_ data: [String: Any]) -> String {
+        str((data["jwtToken"] as? [String: Any]) ?? data, "accessToken")
+    }
 
     struct LoginResult {
         let userId: String
@@ -74,6 +113,8 @@ enum OttaiCloudClient {
         var gracePeriodTime: Int64 = 0
         var calibrationValueK: Double?
         var calibrationValueB: Double?
+        var calibrationK: Double? { calibrationValueK }
+        var calibrationB: Double? { calibrationValueB }
     }
 
     struct DeviceValidation {
@@ -82,18 +123,7 @@ enum OttaiCloudClient {
         let requiresV3Bind: Bool
     }
 
-    struct DeviceSummary {
-        let mac: String
-        let serialNo: String
-        let deviceType: String
-        let deviceVersion: String
-        let bindTime: Int64
-        let unbindTime: Int64
-        var isActive: Bool { unbindTime <= 0 }
-    }
-
-    /// cgmAuth/verify answer (hex). cf, d, c = coefficient, duration and activate frames,
-    /// encrypted by the server for this one connection.
+    /// Server login answer for this Bluetooth connection, in hex.
     struct V3AuthMaterial {
         let authHost: String
         let authFlag: String
@@ -286,7 +316,7 @@ enum OttaiCloudClient {
         ]
         guard let resp = httpPostJson(OttaiConstants.apiBase + OttaiConstants.epSmsLogin, json(body), headers(ts: ts, apiBase: OttaiConstants.apiBase, authorizationOverride: "", profileOverride: profile)),
               let data = dataObject(resp) else { return nil }
-        let result = LoginResult(userId: str(data, "userId"), accessToken: str(data, "accessToken"), glucoseSecretKey: str(data, "glucoseSecretKey"))
+        let result = LoginResult(userId: str(data, "userId"), accessToken: mobileAccessToken(data), glucoseSecretKey: str(data, "glucoseSecretKey"))
         if result.ok {
             OttaiRegistry.saveApiBase(OttaiConstants.apiBase)
             OttaiRegistry.saveSessionProfile(profile)
@@ -351,11 +381,6 @@ enum OttaiCloudClient {
     }
 
     // MARK: - device validate / bind
-
-    static func validateByMac(mac: String) -> DeviceResp? {
-        guard let v = validateForSetup(mac: mac), !v.device.keyA.isEmpty else { return nil }
-        return v.device
-    }
 
     static func validateForSetup(mac: String) -> DeviceValidation? {
         let canonical = OttaiConstants.canonicalSensorId(mac)
@@ -644,6 +669,94 @@ enum OttaiCloudClient {
         return reply
     }
 
+    struct PreparationResult {
+        let operation: OperationResult<OttaiRegistry.DeviceMaterials?>
+        let bindRejected: Bool
+    }
+
+    /// Fetch keys for this sensor before activation.
+    /// After a lost bind response, only read the saved keys from the server.
+    static func prepareMaterials(mac: String, version: String, allowBind: Bool,
+                                 requestedContext: OttaiAccountContext? = nil,
+                                 stillAuthorized: @escaping () -> Bool = { true },
+                                 willBind: @escaping () -> Bool = { true }) -> PreparationResult {
+        let id = OttaiConstants.canonicalSensorId(mac)
+        func cancelled() -> PreparationResult {
+            PreparationResult(operation: .init(value: nil, failure: CloudFailure(
+                text: "The preparation account or Bluetooth session changed. No further binding was sent.")), bindRejected: false)
+        }
+        func authorized() -> Bool {
+            stillAuthorized() && (requestedContext.map { OttaiRegistry.isCurrent($0) } ?? true)
+        }
+        func operation() -> PreparationResult {
+            guard authorized() else { return cancelled() }
+            // The guarded production path checks the existing binding first. A new
+            // sensor must never replace another sensor implicitly, and a failed GET
+            // cannot consume or authorize a binding attempt.
+            if requestedContext != nil, allowBind {
+                let state = perform { bindState(mac: id) }
+                guard authorized(), let binding = state.value else {
+                    return PreparationResult(operation: .init(value: nil, failure: state.failure), bindRejected: false)
+                }
+                switch binding {
+                case .other:
+                    return PreparationResult(operation: .init(value: nil, failure: CloudFailure(
+                        text: "Another sensor is linked to this account. Release it explicitly before starting a new sensor.",
+                        code: bizAlreadyBinding)), bindRejected: false)
+                case .thisSensor:
+                    return recoverPreparation(version: version, bind: nil, lookup: {
+                        perform { authorized() ? boundSensorMaterials(id) : nil }
+                    })
+                case .unbound: break
+                }
+            }
+            let bindOperation: (() -> OperationResult<OttaiRegistry.DeviceMaterials?>)? = allowBind ? {
+                perform {
+                    guard authorized(), willBind(), authorized() else {
+                        lastFailure = cancelled().operation.failure
+                        return nil
+                    }
+                    let response = isSyai
+                        ? OttaiSyaiClient.bindForPreparation(mac: id, firmware: version).flatMap { parseDeviceResp($0) }
+                        : bind(mac: id, deviceVersion: version, userId: OttaiRegistry.loadUserId(), contract: .v3)
+                    guard authorized(), let response = response,
+                          OttaiConstants.canonicalSensorId(response.mac) == id else { return nil }
+                    return toMaterials(mac: id, resp: response)
+                }
+            } : nil
+            let result = recoverPreparation(version: version, bind: bindOperation, lookup: {
+                perform { authorized() ? boundSensorMaterials(id) : nil }
+            })
+            return authorized() ? result : cancelled()
+        }
+        if let requestedContext, requestedContext.apiBase == OttaiConstants.apiBaseSyai {
+            return OttaiSyaiClient.withPreparationContext(requestedContext, stillAuthorized: stillAuthorized,
+                operation: operation) ?? cancelled()
+        }
+        return operation()
+    }
+
+    static func recoverPreparation(version: String,
+                                   bind: (() -> OperationResult<OttaiRegistry.DeviceMaterials?>)?,
+                                   lookup: () -> OperationResult<OttaiRegistry.DeviceMaterials?>) -> PreparationResult {
+        func ready(_ materials: OttaiRegistry.DeviceMaterials?) -> PreparationResult? {
+            guard var materials = materials, materials.authKeys != nil,
+                  OttaiPreparation.versionMatches(version, materials.deviceVersion) else { return nil }
+            // A bind time does not prove when the sensor started.
+            materials.activeTimeMs = 0
+            return PreparationResult(operation: OperationResult(value: materials, failure: nil), bindRejected: false)
+        }
+        let bound = bind?()
+        if let result = ready(bound?.value) { return result }
+        let recovered = lookup()
+        if let result = ready(recovered.value) { return result }
+        let failure = bound?.failure ?? recovered.failure
+            ?? CloudFailure(text: "preparation did not return matching sensor credentials")
+        // A lookup error cannot prove that the earlier bind was refused.
+        let rejected = bound?.value == nil && !(bound?.failure?.code ?? "").isEmpty
+        return PreparationResult(operation: OperationResult(value: nil, failure: failure), bindRejected: rejected)
+    }
+
     // MARK: - bind after a server-assisted activation
 
     /// The bind answer has keyA. If the bind fails (it may have worked on an earlier try),
@@ -717,6 +830,11 @@ enum OttaiCloudClient {
     private static func bindDeviceResponse() -> [String: Any]? {
         if isSyai { return OttaiSyaiClient.getBindDevice() }
         return httpGet(base() + OttaiConstants.epGetBindDevice, [:], headers(ts: now(), apiBase: base()))
+    }
+
+    /// The firmware text ends at the first zero byte.
+    static func softwareRevision(_ bytes: [UInt8]) -> String {
+        String(bytes: bytes.prefix { $0 != 0 }, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
     }
 
     /// "E2.0.3(V1.7.SH22601.3),STDRD" -> "V1.7.SH22601.3".
@@ -808,30 +926,6 @@ enum OttaiCloudClient {
         return lastFailure == nil
     }
 
-    /// Unbinds the sensor if the account still has it bound. Same as JugglucoNG on sensor removal:
-    /// a sensor left bound blocks the next one.
-    static func releaseIfBound(mac: String) -> Bool {
-        guard isSignedIn, case .thisSensor? = bindState(mac: mac) else { return false }
-        return unbind(mac: mac)
-    }
-
-    static func listDevices(pageSize: Int = 80, pageNumber: Int = 1) -> [DeviceSummary] {
-        let ts = now()
-        guard let resp = httpGet(base() + OttaiConstants.epDeviceList,
-                                 ["pageSize": String(pageSize), "pageNumber": String(pageNumber)],
-                                 headers(ts: ts, apiBase: base())),
-              let data = dataObject(resp) else { return [] }
-        let items = (data["items"] as? [[String: Any]]) ?? (data["list"] as? [[String: Any]]) ?? (data["records"] as? [[String: Any]]) ?? []
-        return items.compactMap { o in
-            let mac = str(o, "mac")
-            if mac.isEmpty { return nil }
-            var version = str(o, "deviceVersion")
-            if version.isEmpty { version = str(o["cgmDeviceRespVO"] as? [String: Any], "deviceVersion") }
-            return DeviceSummary(mac: mac, serialNo: str(o, "serialNo"), deviceType: str(o, "deviceType"),
-                                 deviceVersion: version, bindTime: longLoose(o, "bindTime"), unbindTime: longLoose(o, "unbindTime"))
-        }
-    }
-
     // MARK: - parse + decrypt
 
     private static func parseDeviceResp(_ resp: [String: Any], requireKeyA: Bool = true) -> DeviceResp? {
@@ -847,7 +941,7 @@ enum OttaiCloudClient {
             return v.isEmpty ? str(data, key) : v
         }
         func pickTime(_ key: String) -> Int64 { let m = longLoose(mvo, key); return m != 0 ? m : longLoose(vo, key) }
-        return DeviceResp(
+        let device = DeviceResp(
             mac: str(vo, "mac"), keyA: keyA, method: pick("method"), coefficient: pick("coefficient"),
             produceTime: longLoose(vo, "produceTime"), methodUpdateTime: pickTime("methodUpdateTime"), coeffUpdateTime: pickTime("coeffUpdateTime"),
             activeTime: longLoose(vo, "activeTime"), activeExpireTime: longLoose(vo, "activeExpireTime"),
@@ -856,6 +950,11 @@ enum OttaiCloudClient {
             gracePeriodTime: longLoose(vo, "gracePeriodTime"),
             calibrationValueK: Double(pick("calibrationValueK")), calibrationValueB: Double(pick("calibrationValueB"))
         )
+        trace("cloud sensor settings sensor=%{public}@ firmware=%{public}@ calibrationK=%{public}@ calibrationB=%{public}@",
+              log: log, category: ConstantsLog.categoryCGMOttai, type: .info,
+              device.mac, device.deviceVersion.isEmpty ? "missing" : device.deviceVersion,
+              device.calibrationK.map { String($0) } ?? "missing", device.calibrationB.map { String($0) } ?? "missing")
+        return device
     }
 
     /// Decrypt the sensor keys from the cloud answer with the account secret key.
@@ -867,6 +966,9 @@ enum OttaiCloudClient {
         if OttaiCrypto.parseAuthKeys(keyAPlain) == nil { return nil }
         let methodPlain = resp.method.isEmpty ? "" : (OttaiCrypto.decryptMethod(base64Method: resp.method, glucoseSecretKey: secret, methodUpdateTime: String(resp.methodUpdateTime), mac: canonical) ?? "")
         let coeffPlain = resp.coefficient.isEmpty ? "" : (OttaiCrypto.decryptCoefficient(base64Coeff: resp.coefficient, glucoseSecretKey: secret, coeffUpdateTime: String(resp.coeffUpdateTime), mac: canonical) ?? "")
+        trace("cloud factory coefficients sensor=%{public}@ coefficients=%{public}@",
+              log: log, category: ConstantsLog.categoryCGMOttai, type: .info,
+              canonical, coeffPlain.isEmpty ? "missing" : coeffPlain)
         return OttaiRegistry.DeviceMaterials(
             keyAHex: keyAPlain,
             method: OttaiMethodDefaults.resolve(method: methodPlain, coefficient: coeffPlain),

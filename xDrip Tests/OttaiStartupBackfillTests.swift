@@ -14,6 +14,105 @@ final class OttaiStartupBackfillTests: XCTestCase {
 
     private let dayOfRecords = 24 * 60
 
+    private func encryptedStreamingFrame(counter: Int, raw: Int = 2000, key: String) throws -> [UInt8] {
+        let header: [UInt8] = [0, 0, 0, 0, UInt8(counter & 255), UInt8((counter >> 8) & 255), 0, 0]
+        let record: [UInt8] = [UInt8(raw & 255), UInt8((raw >> 8) & 255), 0, 0, 0, 0, 100, 0xac, 0x0d]
+        return try XCTUnwrap(OttaiCrypto.encryptPayload(header + record, sessionKeyHex: key))
+    }
+
+    @MainActor func testCorruptLiveNotificationsDoNotSuppressPolling() throws {
+        let h = OttaiLifetimeTransportHarness()
+        defer { h.clean() }
+        var now = h.originalStart + 3000 * 60_000
+        var materials = h.preparedMaterials
+        materials.activeTimeMs = h.originalStart
+        materials.method = "C0"
+        materials.coefficient = "6"
+        h.transmitter.streamingTestNow = { now }
+        h.transmitter.configureStreamingTest(materials: materials)
+        h.transmitter.receiveLifetimeTest(uuid: OttaiConstants.charGlucoseLive,
+            value: try encryptedStreamingFrame(counter: 3000, key: h.key))
+        XCTAssertEqual(h.transmitter.streamingTestSnapshot().lastLiveNotifyAtMs, now)
+        let validAt = now
+        now += 120_000
+        h.transmitter.receiveLifetimeTest(uuid: OttaiConstants.charGlucoseLive, value: [1, 2, 3])
+        h.transmitter.receiveLifetimeTest(uuid: OttaiConstants.charGlucoseLive,
+            value: try encryptedStreamingFrame(counter: 3002, raw: 0, key: h.key))
+        XCTAssertEqual(h.transmitter.streamingTestSnapshot().lastLiveNotifyAtMs, validAt)
+        h.transmitter.pollStreamingTest()
+        XCTAssertEqual(h.transcript.last, "R:" + OttaiConstants.charGlucoseLive)
+    }
+
+    @MainActor func testRepeatedAcceptedLiveCounterKeepsItsOriginalDate() throws {
+        let h = OttaiLifetimeTransportHarness()
+        defer { h.clean() }
+        let previousBase = OttaiRegistry.loadApiBase()
+        UserDefaults.standard.set(OttaiConstants.apiBase, forKey: "ottai_api_base")
+        defer { UserDefaults.standard.set(previousBase, forKey: "ottai_api_base") }
+        var now = h.originalStart + 3000 * 60_000
+        var materials = h.preparedMaterials
+        materials.activeTimeMs = 0
+        materials.method = "C0"
+        materials.coefficient = "6"
+        h.transmitter.streamingTestNow = { now }
+        h.transmitter.configureStreamingTest(materials: materials)
+        let frame = try encryptedStreamingFrame(counter: 3000, key: h.key)
+        h.transmitter.receiveLifetimeTest(uuid: OttaiConstants.charGlucoseLive, value: frame)
+        let first = try XCTUnwrap(h.transmitter.streamingTestSnapshot().acceptedLiveTimes[3000])
+        now += 60_000
+        h.transmitter.receiveLifetimeTest(uuid: OttaiConstants.charGlucoseLive, value: frame)
+        XCTAssertEqual(h.transmitter.streamingTestSnapshot().acceptedLiveTimes[3000], first)
+        XCTAssertEqual(h.transmitter.streamingTestSnapshot().confirmedActiveTimeMs, 0)
+        h.transmitter.receiveLifetimeTest(uuid: OttaiConstants.charGlucoseLive,
+            value: try encryptedStreamingFrame(counter: 3001, key: h.key))
+        XCTAssertGreaterThan(h.transmitter.streamingTestSnapshot().confirmedActiveTimeMs, 0)
+    }
+
+    @MainActor func testSyaiV3UsesFactoryPreparationAndManufacturerLifetime() throws {
+        let h = OttaiLifetimeTransportHarness(apiBase: OttaiConstants.apiBaseSyai)
+        defer { h.clean() }
+        OttaiRegistry.clearActivationCheckpoint(h.id)
+        for prefix in ["ottai_accepted_max_active_", "ottai_lifetime_evidence_"] { UserDefaults.standard.removeObject(forKey: prefix + h.id) }
+        h.transmitter.prepareLegacySyaiColdStartTest()
+        h.transmitter.startSensor(sensorCode: nil, startDate: Date())
+        h.transmitter.receiveLifetimeTest(uuid: "fixture-drain", value: [])
+        let material = OttaiCloudClient.V3AuthMaterial(authHost: String(repeating: "11", count: 68),
+            authFlag: String(repeating: "22", count: 32), keyB: "", cf: "", d: "", c: "")
+        h.transmitter.beginLegacySyaiAuthenticationTest(material: material)
+        h.ack(OttaiConstants.charAuthAppParam)
+        h.ack(OttaiConstants.charAuthSign)
+        h.transmitter.receiveLifetimeTest(uuid: OttaiConstants.charSoftwareVersion, value: Array(h.materials.deviceVersion.utf8))
+        XCTAssertTrue(OttaiRegistry.hasPreparationCheckpoint(h.id))
+        let prepared = expectation(description: "Syai preparation returns to local ECDH")
+        h.transmitter.preparationTestMaterialFetch = { attempted, willBind in
+            XCTAssertFalse(attempted)
+            XCTAssertTrue(willBind())
+            return h.preparedMaterials
+        }
+        h.transmitter.preparationTestLocalReauth = { prepared.fulfill() }
+        h.status(2)
+        wait(for: [prepared], timeout: 2)
+        h.configure()
+        h.transmitter.resumeActivationTransportTest(materials: h.preparedMaterials)
+        h.transmitter.receiveLifetimeTest(uuid: OttaiConstants.charSoftwareVersion, value: Array(h.materials.deviceVersion.utf8))
+        h.status(2)
+        XCTAssertEqual(h.payloads.last?.0, OttaiConstants.charDestructive)
+        XCTAssertEqual(h.payloads.last?.1.first, 0x09)
+        h.ack(OttaiConstants.charDestructive)
+        XCTAssertEqual(h.transcript.last, "W:" + OttaiConstants.charCurrentTime)
+        h.ack(OttaiConstants.charCurrentTime)
+        XCTAssertEqual(h.transcript.last, "W:" + OttaiConstants.charMaxActiveTime)
+        h.ack(OttaiConstants.charMaxActiveTime)
+        h.duration(14)
+        h.ack(OttaiConstants.charDestructive)
+        XCTAssertGreaterThan(try XCTUnwrap(OttaiRegistry.loadActivationCheckpoint(h.id)).commandSentAtMs, 0)
+        h.ack(OttaiConstants.charCommand)
+        h.status(3)
+        XCTAssertGreaterThan(try XCTUnwrap(OttaiRegistry.loadPreparationCheckpoint(h.id)).confirmedStartMs, 0)
+        XCTAssertEqual(OttaiRegistry.loadAcceptedMaxActive(h.id), 14 * 86_400_000)
+        XCTAssertEqual(OttaiRegistry.lifetimeEvidence(h.id), .sensorReadback)
+    }
+
     @MainActor func testSyaiNoKeyCompatibilityUsesOpaqueServerFramesWithoutFreshBindOrThirtyDayClaim() throws {
         let h = OttaiLifetimeTransportHarness(apiBase: OttaiConstants.apiBaseSyai)
         defer { h.clean() }
@@ -637,7 +736,7 @@ private final class OttaiLifetimeTransportHarness {
         transmitter.prepareForRelease()
         for prefix in ["ottai_active_time_", "ottai_provisional_active_time_", "ottai_last_datano_", "ottai_accepted_max_active_",
                        "ottai_lifetime_evidence_", "ottai_lifetime_intent_", "ottai_lifetime_status_", "ottai_activation_checkpoint_", "ottai_activation_status_",
-                       "ottai_preparation_", "ottai_keya_", "ottai_method_", "ottai_coeff_", "ottai_active_expire_", "ottai_retain_time_",
+                       "ottai_preparation_", "ottai_legacy_preparation_", "ottai_activation_started_", "ottai_sensor_status_", "ottai_record_size_", "ottai_delivered_datano_", "ottai_keya_", "ottai_method_", "ottai_coeff_", "ottai_active_expire_", "ottai_retain_time_",
                        "ottai_preheat_period_", "ottai_grace_period_", "ottai_factory_calibration_k_", "ottai_factory_calibration_b_",
                        "ottai_device_version_", "ottai_device_id_", "ottai_act_tried_", "ottai_v3_bootstrap_pending_", "ottai_pending_bind_", "ottai_last_validated_device_version_"] {
             UserDefaults.standard.removeObject(forKey: prefix + id)

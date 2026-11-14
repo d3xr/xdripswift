@@ -79,7 +79,7 @@ final class CGMUpstreamMigrationTests: XCTestCase {
 
     @MainActor
     func testBothLineagesAreDiscoverableAndMappingsCanBeInferredWithoutCustomMappings() throws {
-        for name in ["xdrip personal v35", "xdrip v37"] {
+        for name in ["xdrip personal v35", "xdrip v37", "xdrip v33 Ottai"] {
             let source = try model(name), destination = try currentModel(), url = try temporaryStoreURL()
             let store = try Store(model: source, url: url)
             try store.close()
@@ -90,6 +90,22 @@ final class CGMUpstreamMigrationTests: XCTestCase {
             XCTAssertFalse(destination.isConfiguration(withName: nil, compatibleWithStoreMetadata: metadata))
             XCTAssertNoThrow(try NSMappingModel.inferredMappingModel(forSourceModel: discovered, destinationModel: destination))
         }
+    }
+
+    @MainActor
+    func testDonorOttaiSQLiteMigratesPreservingReadingsAndDeviceRelationship() throws {
+        let url = try temporaryStoreURL()
+        let source = try Store(model: model("xdrip v33 Ottai"), url: url)
+        _ = try seedCommon(source)
+        try seedOttai(source)
+        try source.context.save()
+        try source.close()
+        let migrated = try migratedStore(at: url)
+        defer { try? migrated.close() }
+        try assertCommon(migrated)
+        try assertOttai(migrated)
+        XCTAssertEqual(try migrated.count("Aidex"), 0)
+        XCTAssertEqual(try migrated.count("SibionicsCN"), 0)
     }
 
     @MainActor

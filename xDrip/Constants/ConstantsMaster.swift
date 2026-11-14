@@ -16,9 +16,9 @@ enum ConstantsMaster {
     /// warm-up time enforced by Dexcom G7/ONE+/Stelo sensors
     static let minimumSensorWarmUpRequiredInMinutesDexcomG7: Double = 30
     
-    /// warm-up time of Ottai / Syai sensors. The Syai manual says: "The first 30 minutes
-    /// after activation is a warm-up period."
-    static let minimumSensorWarmUpRequiredInMinutesOttai: Double = 30
+    /// Match the driver's minimum preheat guard. A longer cloud preheat period
+    /// is enforced by the driver and shown in the device setup screen.
+    static let minimumSensorWarmUpRequiredInMinutesOttai: Double = 60
     
     /// warm-up time enfoced by an Anubis Dexcom G6 transmitter
     static let minimumSensorWarmUpRequiredInMinutesDexcomG6Anubis: Double = 50

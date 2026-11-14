@@ -2362,6 +2362,7 @@
 		B4AE1208D36D77A82C9F707C /* xdrip v38.xcdatamodel */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcdatamodel; path = "xdrip v38.xcdatamodel"; sourceTree = "<group>"; };
 		41F0955E1032599F1F022AEC /* CGMUpstreamMigrationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "xDrip Tests/CGMUpstreamMigrationTests.swift"; sourceTree = SOURCE_ROOT; };
 		B02B27A02FC6E547D5F3C9B1 /* WidgetRuntimeDataTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "xDrip Tests/WidgetRuntimeDataTests.swift"; sourceTree = SOURCE_ROOT; };
+		D17EC7330000000000000002 /* xdrip v33 Ottai.xcdatamodel */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcdatamodel; path = "xdrip v33 Ottai.xcdatamodel"; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -6879,6 +6880,7 @@
 		F85FF3C2252D0C32004E6FF1 /* xdrip.xcdatamodeld */ = {
 			isa = XCVersionGroup;
 			children = (
+				D17EC7330000000000000002 /* xdrip v33 Ottai.xcdatamodel */,
 				C82C663C019140653D79FF52 /* xdrip personal v33.xcdatamodel */,
 				293EF6CEE9077B3AB21729C3 /* xdrip personal v34.xcdatamodel */,
 				16ED17A6FFFFE1849C1B12C7 /* xdrip personal v35.xcdatamodel */,

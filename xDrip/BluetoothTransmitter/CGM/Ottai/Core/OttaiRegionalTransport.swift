@@ -41,6 +41,28 @@ enum OttaiRegionalTransport {
                      path: String(parts.path.dropFirst(prefix.count)), query: query, cn: cn)
     }
 
+    /// Compatibility entry for callers that already resolved a route. It delegates
+    /// to the same production codec; no second secure implementation is kept.
+    typealias Reply = (status: Int, json: [String: Any])
+    static func request(_ method: String, route: Route, body: String?, headers: [String: String],
+                        send: @escaping (String, String, String?, [String: String]) throws -> Reply) throws -> Reply {
+        let plainBase = route.secureBase.replacingOccurrences(of: "/cgm/security/app/server", with: "/cgm/app/server")
+        guard var target = URLComponents(string: plainBase + route.path) else {
+            throw OttaiSecureTransportFailure(diagnostic: "secure_url")
+        }
+        if !route.query.isEmpty {
+            let allowed = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")
+            func encode(_ value: String) -> String { value.addingPercentEncoding(withAllowedCharacters: allowed)! }
+            target.percentEncodedQuery = route.query.keys.sorted().map { encode($0) + "=" + encode(route.query[$0]!) }.joined(separator: "&")
+        }
+        guard let url = target.url?.absoluteString else { throw OttaiSecureTransportFailure(diagnostic: "secure_url") }
+        let result = try request(method, url: url, body: body, headers: headers) { verb, target, payload, common in
+            let reply = try send(verb, target, payload, common)
+            return .init(status: reply.status, json: reply.json)
+        }
+        return (result.status, result.json ?? [:])
+    }
+
     /// Actual production dispatcher; tests inject HTTP here, without an alternate codec.
     static func request(_ method: String, url: String, body: String?, headers: [String: String], send: @escaping Send) throws -> OttaiNetSecurity.Reply {
         guard let route = try route(url, headers: headers) else { return try send(method, url, body, headers) }
