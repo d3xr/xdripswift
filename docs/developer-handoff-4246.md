@@ -1,6 +1,6 @@
 # xDrip+ 4246: техническая передача разработчикам
 
-Current release: **7.2.1 / 4247**. [Upstream sync and branch audit](upstream-sync-7.2.1.md). The 4246 details below remain the historical implementation reference.
+Current release: **7.2.1 / 4249**. [GS1 extension and current data flow](gs1-extension.md). The 4246 details below are historical; diagnostic-only GS1 behavior has been replaced by the opt-in extended glucose flow.
 
 Дата: 14.11.2026. Версия: 7.2.0 / 4246. Код опубликован одним снимком в ветке `custom-build`; [состав и происхождение снимка](public-snapshot.md). Программные проверки и аппаратные свидетельства ниже разделены.
 

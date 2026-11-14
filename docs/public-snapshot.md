@@ -1,6 +1,6 @@
 # Публичная сборка custom-build
 
-Current release: **7.2.1 / 4247**. [Upstream sync and branch audit](upstream-sync-7.2.1.md). The 4246 details below remain the historical implementation reference.
+Current release: **7.2.1 / 4249**. [GS1 extension and current data flow](gs1-extension.md). The 4246 details below are historical; diagnostic-only GS1 behavior has been replaced by the opt-in extended glucose flow.
 
 Версия 7.2.0 / 4246, 14.11.2026. Эта ветка содержит актуальную интеграцию Ottai CN/Global/Syai, GS1 CN и AiDex/LinX/LumiFlex одним коммитом поверх публичной базы [ba37f261](https://github.com/JohanDegraeve/xdripswift/tree/ba37f261352eedfb7f518c4a38e2266acb0f95e9). Приватная история commits не переносится. Ветки upstream и отдельных исправлений сохраняются отдельно.
 

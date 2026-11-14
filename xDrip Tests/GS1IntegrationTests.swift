@@ -2,6 +2,7 @@ import Foundation
 import XCTest
 import CoreBluetooth
 import CoreData
+import UserNotifications
 @testable import xdrip
 
 final class GS1IntegrationTests: XCTestCase {
@@ -242,7 +243,7 @@ final class GS1IntegrationTests: XCTestCase {
         let received = baseTime.addingTimeInterval(120)
         _ = try ended.ingest([sample(1, tail: 2), sample(2, tail: 2)], received: received,
             now: baseTime.addingTimeInterval(GS1Policy.lifetime))
-        XCTAssertEqual(ended.lastStatus, "14-day sensor session ended")
+        XCTAssertEqual(ended.lastStatus, "Sensor session reading limit reached")
     }
 #if targetEnvironment(simulator)
     @MainActor func testPrivateGS1CheckpointRestoreAndFullReplayPreserveExactSourceAndCore() throws {
@@ -310,9 +311,10 @@ final class GS1IntegrationTests: XCTestCase {
     }
 
     func testWarmupDeliveryReportsOriginalSessionWithoutInventingGlucose() throws {
-        let delegate = GS1SessionDelegateSpy()
-        let transmitter = CGMSibionicsTransmitter(address: UUID().uuidString, name: "GS1 test", code: "GEPD802J", mac: "11:22:33:44:55:66", authorized: false, bluetoothTransmitterDelegate: delegate, cGMTransmitterDelegate: delegate)
-        let value = try session(folder())
+        let delegate = GS1SessionDelegateSpy(), uuid = UUID()
+        let identity = try GS1CNIdentity(sensorCode: "GEPD802J", mac: GS1MAC("11:22:33:44:55:66"))
+        let transmitter = CGMSibionicsTransmitter(address: uuid.uuidString, name: "GS1 test", code: "GEPD802J", mac: "11:22:33:44:55:66", authorized: false, bluetoothTransmitterDelegate: delegate, cGMTransmitterDelegate: delegate)
+        let value = try session(folder(), identity: identity.checkpointIdentity(peripheralID: uuid))
         let now = Date(), start = now.addingTimeInterval(-120)
         let readings = try value.ingest([sample(1, tail: 2), sample(2, tail: 2)], received: now, now: now)
         XCTAssertTrue(readings.isEmpty)
@@ -378,13 +380,14 @@ final class GS1IntegrationTests: XCTestCase {
     }
 
     func testReleasedDriverCannotPublishAQueuedNewNativeFinalCorrection() throws {
-        let value = try session(folder()), now = Date()
+        let uuid = UUID(), identity = try GS1CNIdentity(sensorCode: "GEPD802J", mac: GS1MAC("11:22:33:44:55:66"))
+        let value = try session(folder(), identity: identity.checkpointIdentity(peripheralID: uuid)), now = Date()
         let previous = now.addingTimeInterval(-60)
         XCTAssertTrue(try value.ingest((1...64).map { sample($0, tail: 64) }, received: previous, now: previous).isEmpty)
         let readings = try value.ingest([sample(65, tail: 65)], received: now, now: now)
         XCTAssertEqual(readings.map(\.index), [65])
         let observation = try XCTUnwrap(value.liveObservation(at: now)), delegate = GS1SessionDelegateSpy()
-        let transmitter = CGMSibionicsTransmitter(address: UUID().uuidString, name: "GS1 test", code: "GEPD802J", mac: "11:22:33:44:55:66",
+        let transmitter = CGMSibionicsTransmitter(address: uuid.uuidString, name: "GS1 test", code: "GEPD802J", mac: "11:22:33:44:55:66",
             authorized: false, bluetoothTransmitterDelegate: delegate, cGMTransmitterDelegate: delegate)
         transmitter.publish(readings, observation: observation)
         transmitter.prepareForRelease()
@@ -447,80 +450,379 @@ final class GS1IntegrationTests: XCTestCase {
         XCTAssertEqual(coordinator.activeSensor?.objectID, identity)
     }
 
-    func testExtendedBoundariesNeverEnterOrdinaryPublication() {
+    func testExtendedPublicationRequiresExplicitModeAndStopsAtDonorBound() {
+        XCTAssertEqual(GS1Policy.extendedLifetimeMinutes, 34301)
+        XCTAssertEqual(GS1Policy.extendedLifetime, 34301 * 60)
         for index in [20160, 34300, 34301] {
             let date = baseTime.addingTimeInterval(Double(index) * 60)
             XCTAssertFalse(GS1Policy.mayPublish(index: index, timestamp: date, start: baseTime, now: date, live: true, confirmed: true))
-            XCTAssertEqual(GS1Policy.mayInspectExtended(index: index, timestamp: date, start: baseTime, now: date, live: true, confirmed: true), index < 34301)
+            XCTAssertEqual(GS1Policy.mayPublish(index: index, timestamp: date, start: baseTime, now: date, live: true, confirmed: true, extended: true), index < 34301)
         }
-        let drifted = baseTime.addingTimeInterval(20159 * 60)
-        XCTAssertFalse(GS1Policy.mayPublish(index: 20160, timestamp: drifted, start: baseTime, now: drifted, live: true, confirmed: true))
         let last = baseTime.addingTimeInterval(34300 * 60)
-        XCTAssertFalse(GS1Policy.mayInspectExtended(index: 34300, timestamp: last, start: baseTime, now: baseTime.addingTimeInterval(34301 * 60), live: true, confirmed: true))
+        XCTAssertFalse(GS1Policy.mayPublish(index: 34300, timestamp: last, start: baseTime,
+            now: baseTime.addingTimeInterval(34301 * 60), live: true, confirmed: true, extended: true))
+        for index in [34301, 34302] {
+            XCTAssertFalse(GS1Policy.mayPublish(index: index, timestamp: last, start: baseTime,
+                now: last, live: true, confirmed: true, extended: true), "Clock drift must not bypass the index cap")
+        }
+        for (live, confirmed) in [(false, true), (true, false)] {
+            XCTAssertFalse(GS1Policy.mayPublish(index: 34300, timestamp: last, start: baseTime,
+                now: last, live: live, confirmed: confirmed, extended: true))
+        }
     }
 
-    func testExtendedConsentIsDefaultOffIdentityBoundAndInvalidatesQueuedValues() throws {
+    func testExtendedConsentUsesNewPreferenceAndRejectsOldDiagnosticAuthorization() throws {
         let identity = UUID().uuidString, other = UUID().uuidString
-        defer { GS1ExtendedReadingConsent.setEnabled(false, identity: identity); GS1ExtendedReadingConsent.setEnabled(false, identity: other) }
+        let legacyKey = "gs1_extended_readings_" + GS1Journal.hash(Data(identity.utf8))
+        let newKey = "gs1_extended_glucose_v1_" + GS1Journal.hash(Data(identity.utf8))
+        defer {
+            GS1ExtendedReadingConsent.setEnabled(false, identity: identity)
+            GS1ExtendedReadingConsent.setEnabled(false, identity: other)
+            UserDefaults.standard.removeObject(forKey: legacyKey)
+        }
+        UserDefaults.standard.set(true, forKey: legacyKey)
         XCTAssertNil(GS1ExtendedReadingConsent.token(identity))
+        XCTAssertFalse(GS1ExtendedReadingConsent.isEnabled(identity))
         GS1ExtendedReadingConsent.setEnabled(true, identity: identity)
+        XCTAssertTrue(UserDefaults.standard.bool(forKey: newKey))
         let token = try XCTUnwrap(GS1ExtendedReadingConsent.token(identity))
         XCTAssertNil(GS1ExtendedReadingConsent.token(other))
-        let store = GS1ExtendedReadingStore(), now = baseTime.addingTimeInterval(20165 * 60)
-        let value = GS1ExtendedReadingStore.Value(reading: .init(index: 20165, date: now, mgdl: 110), start: baseTime, authorization: token)
-        store.update(value)
-        XCTAssertNotNil(store.current(at: now))
+        XCTAssertTrue(GS1ExtendedReadingConsent.allows(token))
         GS1ExtendedReadingConsent.setEnabled(false, identity: identity)
         GS1ExtendedReadingConsent.setEnabled(true, identity: identity)
-        store.update(value) // A late callback cannot revive an earlier consent generation.
-        XCTAssertNil(store.current(at: now))
-        let renewed = try XCTUnwrap(GS1ExtendedReadingConsent.token(identity))
-        store.update(.init(reading: value.reading, start: baseTime, authorization: renewed))
-        XCTAssertNil(store.current(at: now.addingTimeInterval(121)))
+        XCTAssertFalse(GS1ExtendedReadingConsent.allows(token))
+        XCTAssertNotEqual(GS1ExtendedReadingConsent.token(identity), token)
     }
 
-    func testReleasedDriverRejectsLateExtendedSnapshot() throws {
+    func testOldDiagnosticPreferenceCannotPublishPostFourteenDayGlucose() throws {
+        let uuid = UUID(), identity = try GS1CNIdentity(sensorCode: "GEPD802J", mac: GS1MAC("11:22:33:44:55:66"))
+        let key = identity.checkpointIdentity(peripheralID: uuid)
+        let legacyKey = "gs1_extended_readings_" + GS1Journal.hash(Data(key.utf8))
+        defer {
+            UserDefaults.standard.removeObject(forKey: legacyKey)
+            GS1ExtendedReadingConsent.setEnabled(false, identity: key)
+        }
+        UserDefaults.standard.set(true, forKey: legacyKey)
+        let delegate = GS1SessionDelegateSpy()
+        let transmitter = CGMSibionicsTransmitter(address: uuid.uuidString, name: "GS1 test", code: identity.sensorCode, mac: identity.mac.string,
+            authorized: false, bluetoothTransmitterDelegate: delegate, cGMTransmitterDelegate: delegate)
+        defer { transmitter.prepareForRelease() }
+        let now = Date(), start = now.addingTimeInterval(-20165 * 60)
+        XCTAssertEqual(transmitter.maxSensorAgeInDays(), 14)
+        transmitter.publish([.init(index: 20165, date: now, mgdl: 110)],
+            observation: .init(start: start, latestSampleDate: now, identity: key, authorization: GS1ExtendedReadingConsent.token(key)))
+        let drained = expectation(description: "Old diagnostic preference delivery drained")
+        DispatchQueue.main.async { drained.fulfill() }
+        wait(for: [drained], timeout: 2)
+        XCTAssertTrue(delegate.starts.isEmpty)
+        XCTAssertEqual(delegate.glucoseBatches, 0)
+        XCTAssertEqual(delegate.heartbeats, 0)
+    }
+
+    func testExtendedObservationBindsOwnerGenerationFreshnessAndLifetime() throws {
+        let identity = UUID().uuidString
+        defer { GS1ExtendedReadingConsent.setEnabled(false, identity: identity) }
+        let now = baseTime.addingTimeInterval(34300 * 60)
+        GS1ExtendedReadingConsent.setEnabled(true, identity: identity)
+        let token = try XCTUnwrap(GS1ExtendedReadingConsent.token(identity))
+        let observation = GS1Session.Observation(start: baseTime, latestSampleDate: now, identity: identity, authorization: token)
+        XCTAssertTrue(observation.isCurrent(at: now))
+        XCTAssertFalse(observation.isCurrent(at: now.addingTimeInterval(-1)))
+        XCTAssertFalse(observation.isCurrent(at: now.addingTimeInterval(121)))
+        XCTAssertFalse(observation.isCurrent(at: baseTime.addingTimeInterval(34301 * 60)))
+        XCTAssertFalse(GS1Session.Observation(start: baseTime, latestSampleDate: now).isCurrent(at: now))
+        XCTAssertFalse(GS1Session.Observation(start: baseTime, latestSampleDate: now,
+            identity: UUID().uuidString, authorization: token).isCurrent(at: now))
+        let beforeFactoryExpiry = GS1Session.Observation(start: baseTime, latestSampleDate: baseTime.addingTimeInterval(3600),
+            identity: identity, authorization: token)
+        GS1ExtendedReadingConsent.setEnabled(false, identity: identity)
+        GS1ExtendedReadingConsent.setEnabled(true, identity: identity)
+        XCTAssertFalse(observation.isCurrent(at: now), "A renewed consent cannot revive a queued observation")
+        XCTAssertFalse(beforeFactoryExpiry.isCurrent(at: baseTime.addingTimeInterval(3600)), "An invalid captured token must not fall back to ordinary authorization")
+    }
+
+    func testOrdinaryFactoryReadingRemainsIndependentOfExtendedModeConsentChanges() throws {
+        let value = try session(folder())
+        defer { GS1ExtendedReadingConsent.setEnabled(false, identity: value.identity) }
+        GS1ExtendedReadingConsent.setEnabled(true, identity: value.identity)
+        let authorization = try XCTUnwrap(GS1ExtendedReadingConsent.token(value.identity))
+        _ = try feed(value, through: 64)
+        let now = baseTime.addingTimeInterval(65 * 60)
+        let readings = try value.ingest([sample(65, tail: 65)], received: now, now: now, extendedAuthorization: authorization)
+        XCTAssertEqual(readings.map(\.index), [65])
+        let observation = try XCTUnwrap(value.liveObservation(at: now))
+        GS1ExtendedReadingConsent.setEnabled(false, identity: value.identity)
+        XCTAssertTrue(observation.isCurrent(at: now))
+        XCTAssertNotNil(value.liveObservation(at: now))
+        XCTAssertTrue(observation.allows(try XCTUnwrap(readings.first), at: now))
+    }
+
+    func testExtendedObservationRejectsOutOfRangeIndicesValuesAndDates() throws {
+        let identity = UUID().uuidString
+        defer { GS1ExtendedReadingConsent.setEnabled(false, identity: identity) }
+        GS1ExtendedReadingConsent.setEnabled(true, identity: identity)
+        let authorization = try XCTUnwrap(GS1ExtendedReadingConsent.token(identity))
+        let now = baseTime.addingTimeInterval(34300 * 60)
+        let observation = GS1Session.Observation(start: baseTime, latestSampleDate: now, identity: identity, authorization: authorization)
+        XCTAssertTrue(observation.allows(.init(index: 34300, date: now, mgdl: 110), at: now))
+        XCTAssertFalse(observation.allows(.init(index: 34301, date: now, mgdl: 110), at: now))
+        for value in [0, -1, Double.nan, .infinity, 901] {
+            XCTAssertFalse(observation.allows(.init(index: 34300, date: now, mgdl: value), at: now))
+        }
+        for offset: TimeInterval in [-121, 1] {
+            XCTAssertFalse(observation.allows(.init(index: 34300, date: now.addingTimeInterval(offset), mgdl: 110), at: now))
+        }
+    }
+
+    func testPostFourteenDayDriverPublishesNormalGlucoseWithOriginalAge() throws {
+        let uuid = UUID(), identity = try GS1CNIdentity(sensorCode: "GEPD802J", mac: GS1MAC("11:22:33:44:55:66"))
+        let key = identity.checkpointIdentity(peripheralID: uuid)
+        defer { GS1ExtendedReadingConsent.setEnabled(false, identity: key) }
+        GS1ExtendedReadingConsent.setEnabled(true, identity: key)
+        let token = try XCTUnwrap(GS1ExtendedReadingConsent.token(key)), delegate = GS1SessionDelegateSpy()
+        // No Bluetooth authorization: this exercises decoder delivery only, not physical BLE.
+        let transmitter = CGMSibionicsTransmitter(address: uuid.uuidString, name: "GS1 test", code: identity.sensorCode, mac: identity.mac.string,
+            authorized: false, bluetoothTransmitterDelegate: delegate, cGMTransmitterDelegate: delegate)
+        defer { transmitter.prepareForRelease() }
+        let now = Date(), start = now.addingTimeInterval(-20165 * 60)
+        XCTAssertEqual(transmitter.maxSensorAgeInDays(), GS1Policy.extendedLifetime / 86400)
+        transmitter.publish([.init(index: 20165, date: now, mgdl: 110)],
+            observation: .init(start: start, latestSampleDate: now, identity: key, authorization: token))
+        let drained = expectation(description: "Extended normal glucose delivery drained")
+        DispatchQueue.main.async { drained.fulfill() }
+        wait(for: [drained], timeout: 2)
+        XCTAssertEqual(delegate.starts, [start])
+        XCTAssertEqual(delegate.glucoseBatches, 1)
+        XCTAssertEqual(delegate.glucose.count, 1)
+        XCTAssertEqual(delegate.glucose.first?.timeStamp, now)
+        XCTAssertEqual(delegate.glucose.first?.glucoseLevelRaw, 110)
+        XCTAssertEqual(delegate.glucose.first?.isHistoricalCollection, false)
+        XCTAssertNil(delegate.glucose.first?.backfilledAt)
+        XCTAssertEqual(delegate.glucose.first?.valueIsFromWatch, false)
+        XCTAssertEqual(delegate.sensorAges, [20165 * 60])
+        XCTAssertEqual(delegate.heartbeats, 1)
+        XCTAssertEqual(start, now.addingTimeInterval(-20165 * 60))
+    }
+
+    @MainActor func testExtendedNativeFinalFlowsThroughRootCoreDataAlertsAndTrioAndRejectsQueuedInvalidations() throws {
+        guard !Bundle.main.disableLoopShare else { throw XCTSkip("This host disables OS-AID sharing") }
+        let defaults = UserDefaults.standard
+        let keys = ["isMaster", "transmitterTypeAsString", "loopShareType", "loopShareSmoothedData", "loopShareMedtrumNano",
+            "loopDelaySchedule", "loopDelayValueInMinutes", "timeStampLatestLoopSharedBgReading", "readingsStoredInSharedUserDefaultsAsDictionary", "snoozeAllAlertsUntilDate",
+            "activeSensorStartDate", "activeSensorDescription", "activeSensorMaxSensorAgeInDays", "dexcomSensorSessionIdentityData",
+            "enableAdjustment", "enableGlucoseAdjustment", "enableCurveAdjustment", "enableSmoothing", "showReadingInNotification"]
+        let saved = keys.map { ($0, defaults.object(forKey: $0)) }
+        let shared = try XCTUnwrap(UserDefaults(suiteName: LoopShareType.trio.sharedUserDefaultsSuiteName))
+        let sharedKeys = ["latestReadings", XDripCGMMetadataEnvelope.appGroupKey,
+            "cgmTransmitterDeviceAddress", "cgmTransmitter_CBUUID_Service", "cgmTransmitter_CBUUID_Receive"]
+        let savedShared = sharedKeys.map { ($0, shared.object(forKey: $0)) }
+        defer {
+            for (key, value) in saved { if let value { defaults.set(value, forKey: key) } else { defaults.removeObject(forKey: key) } }
+            for (key, value) in savedShared { if let value { shared.set(value, forKey: key) } else { shared.removeObject(forKey: key) } }
+        }
+        defaults.isMaster = true
+        defaults.cgmTransmitterTypeAsString = CGMTransmitterType.sibionicsCN.rawValue
+        defaults.loopShareType = .trio
+        defaults.loopDelaySchedule = nil
+        defaults.snoozeAllAlertsUntilDate = nil
+        defaults.timeStampLatestLoopSharedBgReading = Date().addingTimeInterval(-3600)
+        for key in ["enableAdjustment", "enableGlucoseAdjustment", "enableCurveAdjustment", "enableSmoothing", "showReadingInNotification"] { defaults.set(false, forKey: key) }
+        for key in sharedKeys { shared.removeObject(forKey: key) }
+
+        let core = CoreDataManager(inMemoryModelName: ConstantsCoreData.modelName)
+        let coordinator = RootApplicationCoordinator(), bluetoothDelegate = GS1SessionDelegateSpy()
         let uuid = UUID(), identity = try GS1CNIdentity(sensorCode: "GEPD802J", mac: GS1MAC("11:22:33:44:55:66"))
         let key = identity.checkpointIdentity(peripheralID: uuid)
         defer { GS1ExtendedReadingConsent.setEnabled(false, identity: key) }
         GS1ExtendedReadingConsent.setEnabled(true, identity: key)
         let token = try XCTUnwrap(GS1ExtendedReadingConsent.token(key))
-        let delegate = GS1SessionDelegateSpy()
-        let transmitter = CGMSibionicsTransmitter(address: uuid.uuidString, name: "GS1 test", code: identity.sensorCode, mac: identity.mac.string,
-            authorized: false, bluetoothTransmitterDelegate: delegate, cGMTransmitterDelegate: delegate)
-        let now = Date(), start = now.addingTimeInterval(-20165 * 60)
-        let reading = GS1Session.Reading(index: 20165, date: now, mgdl: 110)
-        transmitter.updateExtendedReading(reading, start: start, authorization: token)
-        XCTAssertNotNil(transmitter.extendedReadingForDisplay)
-        transmitter.prepareForRelease()
-        // Model an already-running decoder finishing after release cleared the store.
-        transmitter.updateExtendedReading(reading, start: start, authorization: token)
-        XCTAssertNil(transmitter.extendedReadingForDisplay)
-        XCTAssertEqual(delegate.glucoseBatches, 0)
+        let transmitter = CGMSibionicsTransmitter(address: uuid.uuidString, name: "GS1 full pipeline fixture", code: identity.sensorCode,
+            mac: identity.mac.string, authorized: false, bluetoothTransmitterDelegate: bluetoothDelegate, cGMTransmitterDelegate: coordinator)
+        defer { transmitter.prepareForRelease() }
+        let manager = BluetoothPeripheralManager(coreDataManager: core, cgmTransmitterDelegate: coordinator,
+            messageHandler: { _, _ in }, heartBeatFunction: nil, cgmTransmitterInfoChanged: {})
+        manager.bluetoothTransmitters = [transmitter]
+        manager.currentCgmTransmitterAddress = transmitter.deviceAddress
+        let loop = LoopManager(coreDataManager: core, activeSensorIsAnubisProvider: { false }, metadataContextProvider: {
+            .init(activeSensor: coordinator.activeSensor, transmitter: transmitter, sensorHealthIssue: nil,
+                hasInitialCalibration: false, lastCalibrationAt: nil, dexcomAlgorithmState: nil, libreSensorState: nil)
+        })
+        let notificationCenter = GS1PipelineNotificationCenter()
+        let types = AlertTypesAccessor(coreDataManager: core)
+        let entries = AlertEntriesAccessor(coreDataManager: core).getAllEntries(forAlertKind: nil, alertTypesAccessor: types)
+        for entry in entries {
+            entry.isDisabled = entry.alertkind != AlertKind.high.rawValue
+            entry.alertType.enabled = true
+            entry.alertType.soundname = ""
+        }
+        let high = try XCTUnwrap(entries.first { $0.alertkind == AlertKind.high.rawValue })
+        high.value = 1
+        let alerts = AlertManager(coreDataManager: core, soundPlayer: nil, notificationCenter: notificationCenter)
+        coordinator.configureGlucosePipeline(coreDataManager: core, bluetoothPeripheralManager: manager, loopManager: loop, alertManager: alerts)
+
+        let value = try session(folder(), identity: key), now = Date().addingTimeInterval(-60)
+        let baselineDate = now.addingTimeInterval(-5 * 60)
+        XCTAssertTrue(try value.ingest((1...20160).map { sample($0, tail: 20160) }, received: baselineDate,
+            now: baselineDate, extendedAuthorization: token).isEmpty)
+        let readings = try value.ingest((20161...20165).map { sample($0, tail: 20165) }, received: now, now: now, extendedAuthorization: token)
+        XCTAssertEqual(readings.count, 1)
+        let final = try XCTUnwrap(readings.first)
+        let observation = try XCTUnwrap(value.liveObservation(at: now))
+        transmitter.publish(readings, observation: observation)
+        let delivered = expectation(description: "Native correction reaches actual storage, alerts and Trio")
+        DispatchQueue.main.async { delivered.fulfill() }
+        wait(for: [delivered], timeout: 3)
+        XCTAssertTrue(core.saveChangesSynchronously())
+        let stored = try core.mainManagedObjectContext.fetch(BgReading.fetchRequest())
+        XCTAssertEqual(stored.count, 1)
+        XCTAssertEqual(stored.first?.timeStamp, final.date)
+        XCTAssertEqual(stored.first?.calculatedValue, final.mgdl)
+        XCTAssertEqual(coordinator.activeSensor?.startDate, value.start)
+        XCTAssertEqual(defaults.activeSensorStartDate, value.start)
+        XCTAssertEqual(defaults.activeSensorMaxSensorAgeInDays, GS1Policy.extendedLifetime / 86400)
+        XCTAssertTrue(notificationCenter.added.contains { $0.identifier == AlertKind.high.notificationIdentifier() }, "The real glucose threshold evaluator must receive the extended reading")
+        let exportedData = try XCTUnwrap(shared.data(forKey: "latestReadings"))
+        let exported = try XCTUnwrap(JSONSerialization.jsonObject(with: exportedData) as? [[String: Any]])
+        XCTAssertEqual(exported.count, 1)
+        XCTAssertEqual(exported.first?["Value"] as? Double, final.mgdl.rounded())
+        let metadata = try JSONDecoder().decode(XDripCGMMetadataEnvelope.self,
+            from: XCTUnwrap(shared.data(forKey: XDripCGMMetadataEnvelope.appGroupKey)))
+        XCTAssertEqual(metadata.sensor?.startedAt, observation.start.timeIntervalSince1970)
+        XCTAssertEqual(metadata.sensor?.expiresAt, observation.start.addingTimeInterval(GS1Policy.extendedLifetime).timeIntervalSince1970)
+        XCTAssertEqual(metadata.sensor?.state, "active")
+        // Legacy Trio DT stores milliseconds rounded down to whole seconds.
+        let wireGlucoseEpoch = floor(final.date.timeIntervalSince1970)
+        XCTAssertEqual(exported.first?["DT"] as? String, "/Date(\(Int64(wireGlucoseEpoch * 1000)))/")
+        XCTAssertEqual(metadata.latestData?.glucoseAt, wireGlucoseEpoch)
+        XCTAssertNotNil(metadata.source?.lastCommunicationAt)
+        let sensorID = try XCTUnwrap(coordinator.activeSensor).objectID
+        let alertCount = notificationCenter.added.count
+
+        // Exercise the production configuration callback independently of live radio contact.
+        // The fixture decoder is not injected into the transmitter's private BLE session.
+        for enabled in [false, true] {
+            GS1ExtendedReadingConsent.setEnabled(enabled, identity: key)
+            coordinator.sensorSessionConfigurationChanged(startDate: observation.start, from: transmitter)
+            let updated = try JSONDecoder().decode(XDripCGMMetadataEnvelope.self,
+                from: XCTUnwrap(shared.data(forKey: XDripCGMMetadataEnvelope.appGroupKey)))
+            XCTAssertEqual(updated.sensor?.startedAt, metadata.sensor?.startedAt)
+            XCTAssertEqual(updated.sensor?.expiresAt,
+                observation.start.addingTimeInterval(enabled ? GS1Policy.extendedLifetime : GS1Policy.lifetime).timeIntervalSince1970)
+            XCTAssertEqual(updated.sensor?.state, enabled ? "active" : "expired")
+            XCTAssertEqual(updated.source?.lastCommunicationAt, metadata.source?.lastCommunicationAt,
+                "A local mode change is not fresh sensor contact")
+            XCTAssertEqual(updated.latestData, metadata.latestData)
+            XCTAssertEqual(coordinator.activeSensor?.objectID, sensorID)
+            XCTAssertEqual(try core.mainManagedObjectContext.count(for: BgReading.fetchRequest()), 1)
+            XCTAssertEqual(notificationCenter.added.count, alertCount)
+            XCTAssertEqual(shared.data(forKey: "latestReadings"), exportedData)
+        }
+        let metadataBeforeRejectedConfiguration = shared.data(forKey: XDripCGMMetadataEnvelope.appGroupKey)
+        coordinator.sensorSessionConfigurationChanged(startDate: observation.start.addingTimeInterval(-60), from: transmitter)
+        XCTAssertEqual(shared.data(forKey: XDripCGMMetadataEnvelope.appGroupKey), metadataBeforeRejectedConfiguration)
+        let other = CGMSibionicsTransmitter(address: UUID().uuidString, name: "Replaced GS1 fixture", code: identity.sensorCode,
+            mac: identity.mac.string, authorized: false, bluetoothTransmitterDelegate: bluetoothDelegate, cGMTransmitterDelegate: coordinator)
+        defer { other.prepareForRelease() }
+        coordinator.sensorSessionConfigurationChanged(startDate: observation.start, from: other)
+        XCTAssertEqual(shared.data(forKey: XDripCGMMetadataEnvelope.appGroupKey), metadataBeforeRejectedConfiguration)
+
+        for invalidation in ["off/on", "release"] {
+            let authorization = try XCTUnwrap(GS1ExtendedReadingConsent.token(key))
+            let current = Date()
+            transmitter.publish([.init(index: 20170, date: current, mgdl: 120)],
+                observation: .init(start: observation.start, latestSampleDate: current, identity: key, authorization: authorization))
+            if invalidation == "release" { transmitter.prepareForRelease() }
+            else {
+                GS1ExtendedReadingConsent.setEnabled(false, identity: key)
+                GS1ExtendedReadingConsent.setEnabled(true, identity: key)
+            }
+            let drained = expectation(description: "Invalidated full pipeline delivery drained: " + invalidation)
+            DispatchQueue.main.async { drained.fulfill() }
+            wait(for: [drained], timeout: 3)
+            XCTAssertEqual(try core.mainManagedObjectContext.count(for: BgReading.fetchRequest()), 1, invalidation)
+            XCTAssertEqual(coordinator.activeSensor?.objectID, sensorID, invalidation)
+            XCTAssertEqual(coordinator.activeSensor?.startDate, observation.start, invalidation)
+            XCTAssertEqual(notificationCenter.added.count, alertCount, invalidation)
+            XCTAssertEqual(shared.data(forKey: "latestReadings"), exportedData, invalidation)
+        }
     }
 
-    func testExtendedFinalCorrectionsKeepJournalAndOriginalStartOutsideGlucosePipeline() throws {
+    func testQueuedExtendedDriverRejectsRevokedRenewedReleasedAndForeignAuthorization() throws {
+        for invalidation in ["off", "off/on", "release", "foreign owner"] {
+            let uuid = UUID(), identity = try GS1CNIdentity(sensorCode: "GEPD802J", mac: GS1MAC("11:22:33:44:55:66"))
+            let key = identity.checkpointIdentity(peripheralID: uuid), other = UUID().uuidString
+            defer {
+                GS1ExtendedReadingConsent.setEnabled(false, identity: key)
+                GS1ExtendedReadingConsent.setEnabled(false, identity: other)
+            }
+            GS1ExtendedReadingConsent.setEnabled(true, identity: key)
+            GS1ExtendedReadingConsent.setEnabled(true, identity: other)
+            let token = try XCTUnwrap(GS1ExtendedReadingConsent.token(invalidation == "foreign owner" ? other : key))
+            let delegate = GS1SessionDelegateSpy()
+            let transmitter = CGMSibionicsTransmitter(address: uuid.uuidString, name: "GS1 test", code: identity.sensorCode, mac: identity.mac.string,
+                authorized: false, bluetoothTransmitterDelegate: delegate, cGMTransmitterDelegate: delegate)
+            defer { transmitter.prepareForRelease() }
+            let now = Date(), start = now.addingTimeInterval(-20165 * 60)
+            transmitter.publish([.init(index: 20165, date: now, mgdl: 110)],
+                observation: .init(start: start, latestSampleDate: now, identity: key, authorization: token))
+            if invalidation == "release" { transmitter.prepareForRelease() }
+            else if invalidation != "foreign owner" {
+                GS1ExtendedReadingConsent.setEnabled(false, identity: key)
+                if invalidation == "off/on" { GS1ExtendedReadingConsent.setEnabled(true, identity: key) }
+            }
+            let drained = expectation(description: "Invalidated extended delivery drained: " + invalidation)
+            DispatchQueue.main.async { drained.fulfill() }
+            wait(for: [drained], timeout: 2)
+            XCTAssertTrue(delegate.starts.isEmpty, invalidation)
+            XCTAssertEqual(delegate.glucoseBatches, 0, invalidation)
+            XCTAssertEqual(delegate.heartbeats, 0, invalidation)
+        }
+    }
+
+    func testExtendedConsentIsRecheckedBetweenMainQueueCallbacks() throws {
+        let uuid = UUID(), identity = try GS1CNIdentity(sensorCode: "GEPD802J", mac: GS1MAC("11:22:33:44:55:66"))
+        let key = identity.checkpointIdentity(peripheralID: uuid)
+        defer { GS1ExtendedReadingConsent.setEnabled(false, identity: key) }
+        GS1ExtendedReadingConsent.setEnabled(true, identity: key)
+        let token = try XCTUnwrap(GS1ExtendedReadingConsent.token(key)), delegate = GS1SessionDelegateSpy()
+        let transmitter = CGMSibionicsTransmitter(address: uuid.uuidString, name: "GS1 test", code: identity.sensorCode, mac: identity.mac.string,
+            authorized: false, bluetoothTransmitterDelegate: delegate, cGMTransmitterDelegate: delegate)
+        defer { transmitter.prepareForRelease() }
+        let now = Date(), start = now.addingTimeInterval(-20165 * 60)
+        delegate.onObserved = { GS1ExtendedReadingConsent.setEnabled(false, identity: key) }
+        transmitter.publish([.init(index: 20165, date: now, mgdl: 110)],
+            observation: .init(start: start, latestSampleDate: now, identity: key, authorization: token))
+        let drained = expectation(description: "Mid-delivery consent withdrawal drained")
+        DispatchQueue.main.async { drained.fulfill() }
+        wait(for: [drained], timeout: 2)
+        XCTAssertEqual(delegate.starts, [start])
+        XCTAssertEqual(delegate.glucoseBatches, 0)
+        XCTAssertEqual(delegate.heartbeats, 0)
+    }
+
+    func testExtendedFinalCorrectionsEnterNormalPipelineAndPreserveJournalStartAndRecoveryGuards() throws {
         let base = try folder(), value = try session(base)
         defer { GS1ExtendedReadingConsent.setEnabled(false, identity: value.identity) }
         XCTAssertTrue(try feed(value, through: 20160).isEmpty)
         let originalStart = value.start, firstRecord = value.journal.records.first
-        XCTAssertNil(value.extendedReading(at: baseTime.addingTimeInterval(20160 * 60)))
+        XCTAssertNil(value.liveObservation(at: baseTime.addingTimeInterval(20160 * 60)))
         GS1ExtendedReadingConsent.setEnabled(true, identity: value.identity)
         let authorization = try XCTUnwrap(GS1ExtendedReadingConsent.token(value.identity))
         let now = baseTime.addingTimeInterval(20165 * 60)
         let output = try value.ingest((20161...20165).map { sample($0, tail: 20165) }, received: now, now: now, extendedAuthorization: authorization)
-        XCTAssertTrue(output.isEmpty)
-        XCTAssertEqual(try XCTUnwrap(value.extendedReading(at: now)).index, 20165)
-        XCTAssertNil(value.liveObservation(at: now))
+        XCTAssertEqual(output.map(\.index), [20165])
+        XCTAssertEqual(output.first?.date, now)
+        XCTAssertEqual(value.liveObservation(at: now)?.start, originalStart)
         XCTAssertEqual(value.start, originalStart)
         XCTAssertEqual(value.journal.records.first, firstRecord)
         XCTAssertEqual(value.journal.records.count, 20165)
         GS1ExtendedReadingConsent.setEnabled(false, identity: value.identity)
+        XCTAssertNil(value.liveObservation(at: now))
         GS1ExtendedReadingConsent.setEnabled(true, identity: value.identity)
+        XCTAssertNil(value.liveObservation(at: now), "Renewed consent awaits fresh contact")
         let renewed = try XCTUnwrap(GS1ExtendedReadingConsent.token(value.identity))
         let later = now.addingTimeInterval(60)
         XCTAssertTrue(try value.ingest([sample(20166, tail: 20166)], received: later, now: later, extendedAuthorization: renewed).isEmpty)
-        XCTAssertNil(value.extendedReading(at: later), "Opt-out/on must await a new final correction")
         XCTAssertEqual(value.start, originalStart)
 
         let incomplete = baseTime.addingTimeInterval(20171 * 60)
@@ -531,23 +833,21 @@ final class GS1IntegrationTests: XCTestCase {
         let thirdAuthorization = try XCTUnwrap(GS1ExtendedReadingConsent.token(value.identity))
         XCTAssertTrue(try value.ingest([sample(20171, tail: 20171)], received: incomplete, now: incomplete, extendedAuthorization: thirdAuthorization).isEmpty)
         XCTAssertTrue(value.historyReady)
-        XCTAssertNil(value.extendedReading(at: incomplete), "Completing history must not re-authorize an old pending correction")
         let nextFinal = baseTime.addingTimeInterval(20175 * 60)
-        XCTAssertTrue(try value.ingest((20172...20175).map { sample($0, tail: 20175) }, received: nextFinal, now: nextFinal, extendedAuthorization: thirdAuthorization).isEmpty)
-        XCTAssertEqual(value.extendedReading(at: nextFinal)?.index, 20175)
+        XCTAssertEqual(try value.ingest((20172...20175).map { sample($0, tail: 20175) }, received: nextFinal, now: nextFinal, extendedAuthorization: thirdAuthorization).map(\.index), [20175])
         XCTAssertEqual(value.start, originalStart)
 
         let restored = try session(base), firstTail = baseTime.addingTimeInterval(20180 * 60)
+        XCTAssertNil(restored.liveObservation(at: nextFinal))
         XCTAssertTrue(try restored.ingest((20176...20180).map { sample($0, tail: 20180) }, received: firstTail,
             now: firstTail, extendedAuthorization: thirdAuthorization).isEmpty)
         XCTAssertEqual(restored.baselineTailIndex, 20180)
-        XCTAssertNil(restored.extendedReading(at: firstTail), "The first restored tail is not a diagnostic publication")
         let fresh = baseTime.addingTimeInterval(20185 * 60)
-        XCTAssertTrue(try restored.ingest((20181...20185).map { sample($0, tail: 20185) }, received: fresh,
-            now: fresh, extendedAuthorization: thirdAuthorization).isEmpty)
-        XCTAssertEqual(restored.extendedReading(at: fresh)?.index, 20185)
-        XCTAssertNil(restored.liveObservation(at: fresh))
+        XCTAssertEqual(try restored.ingest((20181...20185).map { sample($0, tail: 20185) }, received: fresh,
+            now: fresh, extendedAuthorization: thirdAuthorization).map(\.index), [20185])
+        XCTAssertEqual(restored.liveObservation(at: fresh)?.start, originalStart)
         XCTAssertEqual(restored.start, originalStart)
+        XCTAssertEqual(restored.journal.records.first, firstRecord)
     }
     func testCheckpointAndFullJournalReplayHaveIdenticalCoreState() throws {
         let base = try folder(), first = try session(base)
@@ -1566,11 +1866,20 @@ private final class GS1SessionDelegateSpy: CGMTransmitterDelegate, BluetoothTran
     var glucoseBatches = 0
     var heartbeats = 0
     var observed: XCTestExpectation?
-    func sensorSessionObserved(startDate: Date, from transmitter: CGMTransmitter) { starts.append(startDate); observed?.fulfill() }
+    var glucose: [GlucoseData] = []
+    var sensorAges: [TimeInterval] = []
+    var onObserved: (() -> Void)?
+    var configurationChanges = 0
+    func sensorSessionObserved(startDate: Date, from transmitter: CGMTransmitter) { starts.append(startDate); observed?.fulfill(); onObserved?() }
+    func sensorSessionConfigurationChanged(startDate: Date, from transmitter: CGMTransmitter) { configurationChanges += 1 }
     func newSensorDetected(sensorStartDate: Date?) { XCTFail("Observation must not restart a sensor") }
     func sensorStopDetected() {}
     func sensorNotDetected() {}
-    func cgmTransmitterInfoReceived(glucoseData: inout [GlucoseData], transmitterBatteryInfo: TransmitterBatteryInfo?, sensorAge: TimeInterval?) { glucoseBatches += 1 }
+    func cgmTransmitterInfoReceived(glucoseData: inout [GlucoseData], transmitterBatteryInfo: TransmitterBatteryInfo?, sensorAge: TimeInterval?) {
+        glucoseBatches += 1
+        glucose.append(contentsOf: glucoseData)
+        if let sensorAge { sensorAges.append(sensorAge) }
+    }
     func errorOccurred(xDripError: XdripError) {}
     func didConnectTo(bluetoothTransmitter: BluetoothTransmitter) {}
     func didDisconnectFrom(bluetoothTransmitter: BluetoothTransmitter) {}
@@ -1580,6 +1889,17 @@ private final class GS1SessionDelegateSpy: CGMTransmitterDelegate, BluetoothTran
     func pairingFailed() {}
     func error(message: String) {}
     func heartBeat() { heartbeats += 1 }
+}
+
+/// Records requests from the real AlertManager without simulator notification permissions.
+private final class GS1PipelineNotificationCenter: AlertNotificationScheduling {
+    var added: [UNNotificationRequest] = []
+    func add(_ request: UNNotificationRequest, withCompletionHandler completionHandler: (@Sendable (Error?) -> Void)?) {
+        added.append(request)
+        completionHandler?(nil)
+    }
+    func removeDeliveredNotifications(withIdentifiers identifiers: [String]) {}
+    func removePendingNotificationRequests(withIdentifiers identifiers: [String]) {}
 }
 
 #if GS1_LAB

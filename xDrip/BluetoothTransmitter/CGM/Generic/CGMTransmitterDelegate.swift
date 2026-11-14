@@ -54,6 +54,9 @@ protocol CGMTransmitterDelegate:AnyObject {
     /// This is metadata only; it does not imply that a glucose result is available.
     func sensorSessionObserved(startDate: Date, from transmitter: CGMTransmitter)
 
+    /// A local session setting changed; this does not indicate new sensor communication.
+    func sensorSessionConfigurationChanged(startDate: Date, from transmitter: CGMTransmitter)
+
     /// Reports G6/ONE calibration stages after reconciling the transmitter's session date.
     func dexcomG6CalibrationStateReceived(_ state: DexcomAlgorithmState, sensorStartDate: Date, from transmitter: CGMG5Transmitter)
     
@@ -64,5 +67,6 @@ extension CGMTransmitterDelegate {
     func sensorSessionStartResultReceived(_ result: CGMSensorSessionStartResult) {}
     func sensorSessionConfirmed(startDate: Date) {}
     func sensorSessionObserved(startDate: Date, from transmitter: CGMTransmitter) {}
+    func sensorSessionConfigurationChanged(startDate: Date, from transmitter: CGMTransmitter) {}
     func dexcomG6CalibrationStateReceived(_ state: DexcomAlgorithmState, sensorStartDate: Date, from transmitter: CGMG5Transmitter) {}
 }

@@ -25,13 +25,13 @@ At first activation, the app requests **up to 30 days total**. It reads the life
 
 For an **already active Ottai CN or Global**, the device card offers **Request 30 days total**. The request keeps the original start time and history. It does not give the sensor another 30 days or start a new session. The app reads back the setting and checks that the sensor remains active.
 
-**A confirmed setting does not prove that the sensor will keep measuring beyond its original expiry.** Physical first activation and long-term extension with this implementation still require hardware testing. Syai uses its manufacturer-defined activation duration; these 30-day controls apply to Ottai CN and Global.
+**Ottai activation and extension are in testing.** Syai retains its manufacturer-defined activation duration.
 
 ### GS1 and Trio
 
 GS1 CN readings are calculated locally using the included native library. Reading an already running GS1 and sharing its glucose with Trio have been checked on an iPhone. Support is limited to the Chinese AA55/V115G variant.
 
-An optional experimental mode shows limited diagnostics after the normal 14-day period. Those values stay in the device card and are excluded from the main glucose graph, alerts and Trio. This mode does not restart the sensor.
+Enable extension in the GS1 device card to continue after 14 days. Fresh calculated readings go to the main graph, alerts and Trio. **Extension is in testing.**
 
 ## Build with your own signing
 
@@ -68,12 +68,13 @@ The script builds a signed `.app` and prints its location. Installation is a sep
 2. Connect an already active sensor to read it. For a new Ottai, sign in to the correct regional account, wake the sensor if necessary, connect and select **Start / activate sensor**.
 3. Open **Settings → OS-AID Share → Share with OS-AID** and select **Trio** to share normal glucose readings with your compatible Trio installation.
 
-New-sensor activation, NFC wake, operation beyond the original expiry and AiDex-family hardware coverage still need further device testing. Automated tests check software behavior; they do not establish physical sensor performance.
+New-sensor activation, NFC and AiDex-family support are in testing.
 
 ## Technical documentation
 
 - [Signing profiles and capabilities](docs/build-profiles.md)
 - [Ottai activation and lifetime behavior](docs/ottai-activation.md)
+- [GS1 extension and data flow](docs/gs1-extension.md)
 - [GS1 native library, source and rebuilding](Vendor/GS1Native/README.md)
 - [Upstream user guide](https://xdrip4ios.readthedocs.io/en/latest/)
 
