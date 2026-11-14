@@ -1,0 +1,3 @@
+// Copy to xDripConfigOverride.xcconfig and set your own Apple Developer Team.
+// The live override is ignored by Git. The repository defaults retain NFC.
+XDRIP_DEVELOPMENT_TEAM = YOURTEAMID

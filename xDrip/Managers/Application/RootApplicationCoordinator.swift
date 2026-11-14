@@ -1079,24 +1079,36 @@ import AppIntents
         let referenceDate = glucoseData.map { $0.timeStamp }.max() ?? Date()
         let detectedStartDate = referenceDate.addingTimeInterval(-sensorAge)
 
+        synchronizeDetectedSensorStartDate(detectedStartDate, cgmTransmitter: cgmTransmitter, coreDataManager: coreDataManager)
+    }
+
+    private func synchronizeDetectedSensorStartDate(_ detectedStartDate: Date, cgmTransmitter: CGMTransmitter, coreDataManager: CoreDataManager) {
+
         guard let activeSensor = activeSensor else {
             // no need to send to transmitter, because we received glucose data, so transmitter knows the sensor already
             startSensor(cGMTransmitter: cgmTransmitter, sensorStarDate: detectedStartDate, sensorCode: nil, coreDataManager: coreDataManager, sendToTransmitter: false)
             return
         }
 
-        guard cgmTransmitter.cgmTransmitterType() == .dexcomG7 else { return }
-
         let sensorStartDateTolerance = TimeInterval(minutes: 5)
-        guard abs(activeSensor.startDate.timeIntervalSince(detectedStartDate)) > sensorStartDateTolerance else { return }
+        let delta = abs(activeSensor.startDate.timeIntervalSince(detectedStartDate))
+        guard delta > sensorStartDateTolerance else { return }
+
+        // Aidex sensors report a factory start time via 0x21 that may differ from
+        // the effective activation time (e.g. after CLEAR_STORAGE + SET_NEW_SENSOR).
+        // Allow ongoing correction as the transmitter refines its sensorAge estimate.
+        let supportedTypes: Set<CGMTransmitterType> = [.dexcomG7, .Aidex]
+        guard supportedTypes.contains(cgmTransmitter.cgmTransmitterType()) else { return }
 
         trace(
-            "in synchronizeDetectedSensorStartDate, correcting Dexcom G7/ONE+/Stelo active sensor start date from %{public}@ to %{public}@ using transmitter sensor age",
+            "in synchronizeDetectedSensorStartDate, correcting %{public}@ active sensor start date from %{public}@ to %{public}@ (delta=%{public}.0fs) using transmitter sensor age",
             log: log,
             category: ConstantsLog.categoryRootView,
             type: .info,
+            cgmTransmitter.cgmTransmitterType().rawValue,
             activeSensor.startDate.description(with: .current),
-            detectedStartDate.description(with: .current)
+            detectedStartDate.description(with: .current),
+            delta
         )
 
         // This is a date correction on the same Sensor, not a new session. Preserve its
@@ -2013,9 +2025,17 @@ import AppIntents
                 calibrator = Libre1Calibrator()
             }
 
+        case .ottai:
+            // Ottai / Syai send glucose that is already calibrated
+            calibrator = NoCalibrator()
+
         case .medtrumTouchCareNano:
             // Values arrive already calibrated to mg/dL. The transmitter applies the Medtrum per-sensor
             // calibration factor decoded from each packet, so xDrip should not run its own calibrator.
+            calibrator = NoCalibrator()
+
+        case .Aidex, .sibionicsCN:
+            // These sources send final calibrated data — no xDrip-side calibration needed
             calibrator = NoCalibrator()
 
         }
@@ -2534,7 +2554,7 @@ import AppIntents
     }
 
     /// update the data source information view and also the sensor progress view (if needed)
-    private func updateDataSourceInfo() {
+    private func updateDataSourceInfo(transmitter: CGMTransmitter? = nil) {
         defer {
             publishRootHomeState()
             reconcileSensorExpiryReminders()
@@ -2548,7 +2568,7 @@ import AppIntents
         
         // check if there is a transmitter connected (needed as Dexcom will only connect briefly every 5 minutes)
         // if there is a transmitter connected, pull the current maxSensorAgeInDays and store in in UserDefaults
-        if let cgmTransmitter = self.bluetoothPeripheralManager?.getCGMTransmitter(), let maxDays = cgmTransmitter.maxSensorAgeInDays() {
+        if let cgmTransmitter = transmitter ?? self.bluetoothPeripheralManager?.getCGMTransmitter(), let maxDays = cgmTransmitter.maxSensorAgeInDays() {
             UserDefaults.standard.activeSensorMaxSensorAgeInDays = maxDays
             UserDefaults.standard.activeSensorDescription = (cgmTransmitter as? CGMLibre3Transmitter)?.productName ?? cgmTransmitter.cgmTransmitterType().detailedDescription()
         }
@@ -2787,6 +2807,10 @@ import AppIntents
             }
             startDate = sensorStartDate ?? startDate
             switch transmitter?.cgmTransmitterType().sensorType() {
+            case .Aidex:
+                duration = ConstantsAidex.warmupMinutes
+            case .SibionicsCN:
+                duration = 60
             case .Libre:
                 duration = transmitter?.sensorWarmupDurationInMinutes() ?? ConstantsMaster.minimumSensorWarmUpRequiredInMinutes
             case .Dexcom:
@@ -3067,6 +3091,29 @@ extension RootApplicationCoordinator: @preconcurrency CGMTransmitterDelegate {
 
         coreDataManager.saveChanges()
         updateLabelsAndChart(overrideApplicationState: false)
+    }
+
+    func sensorSessionObserved(startDate: Date, from transmitter: CGMTransmitter) {
+        guard let coreDataManager,
+              synchronizeObservedSession(startDate: startDate, from: transmitter,
+                  currentTransmitter: bluetoothPeripheralManager?.getCGMTransmitter(), coreDataManager: coreDataManager) else { return }
+        loopManager?.shareMetadata(lastCommunicationAt: Date())
+        updateLiveActivityAndWidgets(forceRestart: false, sensorStartDate: activeSensor?.startDate)
+    }
+
+    @discardableResult
+    func synchronizeObservedSession(startDate: Date, from transmitter: CGMTransmitter,
+                                    currentTransmitter: CGMTransmitter?, coreDataManager: CoreDataManager) -> Bool {
+        // A queued event from a removed/replaced transmitter must never create a session.
+        // GS1 supplies a corroborated original anchor even while its glucose is warming up.
+        guard currentTransmitter === transmitter,
+              transmitter.cgmTransmitterType() == .sibionicsCN,
+              startDate.timeIntervalSince1970.isFinite, startDate <= Date() else { return false }
+        synchronizeDetectedSensorStartDate(startDate, cgmTransmitter: transmitter, coreDataManager: coreDataManager)
+        // The synchronizer creates only a missing Sensor. It neither replaces nor
+        // reanchors an existing GS1 session, preserving calibrations and history.
+        updateDataSourceInfo(transmitter: transmitter)
+        return true
     }
 
     func sensorSessionStartResultReceived(_ result: CGMSensorSessionStartResult) {

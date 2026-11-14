@@ -1,81 +1,60 @@
-# xDrip4iOS
+# xDrip+ для iOS
 
-**[Online documentation: compatibility, installation, setup and troubleshooting](https://xdrip4ios.readthedocs.io/en/latest/)**
+Интеграционная сборка **xDrip4iOS 7.2.0 / 4246** с Ottai CN/Global/Syai, Sibionics GS1 CN, AiDex/LinX/LumiFlex и передачей штатной глюкозы в Trio. Это iOS-проект; он не является Android xDrip+ и не использует Android keystore.
 
-xDrip4iOS (`xdripswift`) is a community-developed, open-source iOS app for displaying and managing real-time continuous glucose monitor (CGM) data. It can connect directly to a compatible CGM in **Master** mode or retrieve remote readings from an online service in **Follower** mode.
+Исходная upstream-база: [JohanDegraeve/xdripswift@ba37f261](https://github.com/JohanDegraeve/xdripswift/tree/ba37f261352eedfb7f518c4a38e2266acb0f95e9), 7.2.0 / 4234. В этой базе перечисленных дополнительных семейств нет. Ottai/Syai основан на [PR736](https://github.com/JohanDegraeve/xdripswift/pull/736); AiDex/LinX/LumiFlex — отдельная интеграция из [PR740](https://github.com/JohanDegraeve/xdripswift/pull/740). Остальные upstream-источники CGM и функции приложения сохранены.
 
-xDrip4iOS is not related to the xDrip+ project for Android.
+Публичная интеграционная ветка — **`custom-build`**. [Как опубликован снимок и что исключено](docs/public-snapshot.md).
 
-> [!IMPORTANT]
-> xDrip4iOS is experimental software. It is not a regulated medical device and is not approved for making treatment decisions. Never rely on it as the only source of glucose information. Use it at your own risk and confirm readings with approved equipment when necessary.
+## Что добавлено
 
-## Current capabilities
+| Направление | Реализовано | Граница подтверждения |
+|---|---|---|
+| Ottai CN/Global | Собственная BLE-подготовка нового сенсора, cloud credentials, factory parameters и активация; запрос до 30 дней с обязательным точным read-back | Первая физическая активация этой версией ещё не испытывалась; нужны аккаунт и интернет |
+| Активный Ottai | Отдельный ручной запрос общего срока 30 дней от исходного старта, read-back и повторная проверка status 3; без RTC/ACTIVATE/сброса возраста | Подтверждённый параметр не доказывает пересчёт firmware deadline или работу после прежнего срока |
+| NFC wake CN/Syai | Ручное пассивное RF-поле ISO14443, без proprietary tag commands и автоматической BLE-активации | Нужна подпись с NFC TAG; readiness/tag detection не подтверждают identity или физический wake |
+| Syai | Сохранена прежняя server-assisted активация с серверными frames | Opaque серверный срок не выдаётся за подтверждённые 30 дней |
+| Sibionics GS1 CN AA55/V115G | Direct BLE, непрерывный журнал, локальный native-алгоритм, новые final corrections и обычный экспорт в Trio | Проверено чтение уже работавшего GS1; физический cold start не испытывался |
+| GS1 после 14 дней | Отдельная диагностика final в карточке устройства до 23 д 19 ч 41 мин от исходного старта | По умолчанию выключена; не поступает в основной график, уведомления или Trio и не перезапускает сенсор |
 
-### Glucose data sources
+**В Git хранится полный профиль:** NFC включён, используются штатные TAG entitlements. Личные Team ID, provisioning и ограничения Personal Team остаются в игнорируемом локальном override. Для включения NFC после получения подходящей подписи переписывать реализацию не нужно.
 
-Master mode currently includes:
+## Документация для разработчика
 
-- Dexcom G6, Anubis and ONE
-- Dexcom G7, ONE+ and Stelo over native Bluetooth, in Primary or Coexistence mode
-- Libre 2 and Libre 2 Plus EU sensors over direct Bluetooth
-- Compatible Libre sensors through MiaoMiao or Nano/Bubble/Bubble Mini transmitters
+- [Техническая передача 4246: архитектура, сенсоры, два сценария срока, сборка и проверки](docs/developer-handoff-4246.md).
+- [Полный список изменённых файлов](docs/changes-4246.md).
+- [Профили собственной подписи: полный и Personal Team](docs/build-profiles.md).
+- [Протокол активации Ottai](docs/ottai-activation.md).
+- [GS1 Native: использование и пересборка исходников](Vendor/GS1Native/README.md).
+- [История подготовки upstream и отдельных PR](docs/upstream/PLAN.md).
 
-Follower mode supports:
+## Быстрая сборка со своей подписью
 
-- Nightscout, including Loop and OpenAPS/AAPS status data
-- Dexcom Share
-- Shared Calendar
-- CareLink
-- LibreLinkUp and LibreLinkUp Russia
-- Medtrum EasyView
+Проверенная среда — Mac Apple Silicon, **Xcode 27.0 / SDK 27.0**, Python3. Готовый GS1 XCFramework содержит ARM64 для iPhone и Simulator; x86_64 Simulator не поставляется. Обычная сборка не требует Kotlin, JVM, CocoaPods или загрузки отдельного native core.
 
-Sensor support depends on the exact model, region, transmitter firmware and whether an official CGM app must run alongside xDrip4iOS. Check the [compatibility guide](https://xdrip4ios.readthedocs.io/en/latest/#compatible-sensors) before choosing hardware or changing your setup.
+```sh
+git clone --branch custom-build https://github.com/d3xr/xdripswift.git xdrip-plus
+cd xdrip-plus
+cp xDripConfigOverride.xcconfig.example xDripConfigOverride.xcconfig
+```
 
-### App features
+Указать собственный `XDRIP_DEVELOPMENT_TEAM` в созданном файле. Настроить доступные этой Team HealthKit, NFC TAG и App Groups для приложения и расширений. Для прямого sharing с Trio нужны совместимые подписи и App Groups; чужая Team не получает доступ к прежнему контейнеру только от совпадения строки идентификатора.
 
-- Adaptive iPhone and iPad Home layouts, including Clock Mode and configurable glucose chart ranges
-- Optional sensor-noise bands, reading history, treatments, local IOB and COB estimates, statistics and time-in-range views
-- Custom glucose, missed-reading, device and battery alerts, with scheduled spoken readings and trends
-- Nightscout upload and synchronization, Dexcom Share upload and Apple Health integration
-- Apple Watch app and complications
-- Home Screen and Lock Screen widgets, StandBy support, Live Activities and Dynamic Island layouts, including sensor warm-up status
-- Siri and Shortcuts access to the latest reading and Speak Glucose controls
-- Optional calendar events and contact-image displays
-- AID status displays and open-source data sharing with Loop/iAPS and Trio
-- Contextual links to the online documentation and a filterable Activity Log for troubleshooting
-- Bluetooth connection diagnostics, signal-strength history and per-device battery history
-- Bluetooth output to M5Stack and M5StickC companion displays
+```sh
+export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
+bash scripts/build-local.sh
+```
 
-## Requirements
+Скрипт собирает `.app`, проверяет подпись и выводит путь пакета. Он не устанавливает приложение и не запускает сенсор. Для работы в Xcode открыть `xdrip.xcworkspace`, scheme `xdrip`.
 
-- An iPhone or iPad running iOS/iPadOS 16.2 or later
-- Apple Watch Series 4 or newer running watchOS 10 or later for Watch features
-- An internet connection for follower modes and cloud services
-- A compatible CGM setup for Master mode
+Для Personal Team — [отдельный локальный профиль](docs/build-profiles.md#локальный-personal-team). Он отключает только NFC. Спящему CN/Syai тогда требуется внешнее NFC-пробуждение; исследованный Global использует BLE без этого шага.
 
-Some extensions and system features require newer hardware or iOS versions.
+## Проверки и ограничения
 
-## Availability and development
+На реализации 4246 выполнены **313 целевых XCTest** без ошибок в подготовленном окружении, включая 43 новых теста. На чистом checkout один тест личного GS1 replay ожидаемо пропускается: его приватные входные данные не входят в репозиторий. Это не результат полного upstream suite. Подробности и воспроизводимые команды — в [технической передаче](docs/developer-handoff-4246.md#проверки).
 
-xDrip4iOS is primarily a do-it-yourself app and does not have an open public TestFlight. The supported installation paths are building from source with Xcode on a Mac or creating a personal TestFlight build with GitHub Actions and Fastlane.
+Simulator, synthetic HTTP и transport seams проверяют программную логику. Они не подтверждают реальный Bluetooth/NFC, новую физическую активацию, точность или продление firmware. Чтение истории, ACK, read-back срока и новые измерения после прежнего deadline — разные уровни подтверждения.
 
-The current project is configured for Xcode 26, Swift 5, iOS 16.2 and watchOS 10. Stable releases are maintained on `master`, while ongoing development is merged through `develop`.
+## Происхождение и лицензии
 
-The maintained [installation documentation](https://xdrip4ios.readthedocs.io/en/latest/install/install/) describes the available options and requirements. The repository also contains the supporting [personal TestFlight documentation](fastlane/testflight.md).
-
-## Documentation and support
-
-- [User documentation](https://xdrip4ios.readthedocs.io/en/latest/)
-- [Installation and setup](https://xdrip4ios.readthedocs.io/en/latest/install/install/)
-- [Troubleshooting](https://xdrip4ios.readthedocs.io/en/latest/troubleshoot/)
-- [GitHub issues](https://github.com/JohanDegraeve/xdripswift/issues) for verified, reproducible bugs
-
-Please use the community support channels linked from the documentation for general setup help rather than opening a bug report or contacting maintainers privately.
-
-## Contributing
-
-Bug fixes, translations, documentation improvements and new features are welcome. Base development work on the `develop` branch and open a pull request with a clear description of the change and how it was tested.
-
-## License
-
-xDrip4iOS is released under the [GNU General Public License v3.0](LICENSE).
+Проект наследует [GPLv3](LICENSE) xDrip4iOS. Атрибуция Ottai/JugglucoNG сохранена в исходниках; для GS1 Native — [NOTICE](Vendor/GS1Native/NOTICE.md), лицензии и source archive. GS1 core — community reverse engineering, не официальный SDK производителя. Общая документация upstream: [xdrip4ios.readthedocs.io](https://xdrip4ios.readthedocs.io/en/latest/).

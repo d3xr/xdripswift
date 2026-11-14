@@ -1,6 +1,9 @@
 #######
 # config files, to be edited by developer 
 xDripConfigOverride.xcconfig
+/xDripPersonalTeam.entitlements
+/xDrip/xDripOverride.xcconfig
+/xDrip/VersionOverride.xcconfig
 
 .DS_Store
 UserInterfaceState.xcuserstate
@@ -122,3 +125,9 @@ xdripswift.wiki/
 commit.txt
 
 *.bak
+
+# Local signed build outputs
+/.local-build/
+
+# Compiler cache artifacts
+*.pch

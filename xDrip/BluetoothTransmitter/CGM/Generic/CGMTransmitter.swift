@@ -194,9 +194,17 @@ enum CGMTransmitterType:String, CaseIterable {
     case Libre2 = "Libre2"
     case Libre3 = "Libre3"
 
+    /// Ottai / Syai
+    case ottai = "Ottai/Syai"
+
     /// Medtrum TouchCare Nano Pump with integrated CGM data relayed via the pump BLE session.
     /// Keep this raw value stable because it is persisted in UserDefaults.
     case medtrumTouchCareNano = "Medtrum Nano"
+
+    /// Aidex / Linx / LumiFlex CGM sensor
+    case Aidex = "AiDex/Linx/Lumiflex"
+
+    case sibionicsCN = "Sibionics GS1 CN (14-day)"
 
     /// Direct Medtrum Nano glucose is already consumed by the connected pump and must not be
     /// exported as an independent CGM source to another OS-AID system.
@@ -211,20 +219,25 @@ enum CGMTransmitterType:String, CaseIterable {
 
     /// what sensorType does this CGMTransmitter type support
     func sensorType() -> CGMSensorType {
-        
+
         switch self {
-            
+
         case .dexcom, .dexcomG7:
             return .Dexcom
             
-        case .miaomiao, .Bubble, .Libre2, .Libre3:
+        case .miaomiao, .Bubble, .Libre2, .Libre3, .ottai:
             return .Libre
 
         case .medtrumTouchCareNano:
             return .Medtrum
 
+        case .Aidex:
+            return .Aidex
+        case .sibionicsCN:
+            return .SibionicsCN
+
         }
-        
+
     }
     
     /// if true, then a class conforming to the protocol CGMTransmitterDelegate will call newSensorDetected if it detects a new sensor is placed. Means there's no need to let the user start and stop a sensor
@@ -246,8 +259,12 @@ enum CGMTransmitterType:String, CaseIterable {
             
         case .Libre2, .Libre3:
             return true
-            
+
         case .dexcomG7:
+            return true
+
+        case .ottai:
+            // Ottai sends the sensor age itself, in cgmTransmitterInfoReceived.
             return true
 
         case .medtrumTouchCareNano:
@@ -256,9 +273,12 @@ enum CGMTransmitterType:String, CaseIterable {
             // its internal sensor record from the sensorAge we pass with each reading.
             return true
 
+        case .Aidex, .sibionicsCN:
+            return true
+
         }
     }
-    
+
     /// this function says if the user should be able to manually start the sensor.
     ///
     /// Would normally not be required, because if canDetectNewSensor returns true, then manual start shouldn't e necessary.
@@ -275,8 +295,15 @@ enum CGMTransmitterType:String, CaseIterable {
         case .dexcomG7, .Libre3:
             return false
 
+        case .ottai:
+            // "start sensor" starts the Ottai activation. It cannot be undone.
+            return true
+
         case .medtrumTouchCareNano:
             // EasyPatch owns sensor lifecycle. xDrip should not offer a manual start UI.
+            return false
+
+        case .Aidex, .sibionicsCN:
             return false
 
         }
@@ -301,8 +328,15 @@ enum CGMTransmitterType:String, CaseIterable {
         case .dexcomG7:
             return ConstantsDefaultAlertLevels.defaultBatteryAlertLevelDexcomG7
 
+        case .ottai:
+            // Ottai does not send a battery level, so this value is not used.
+            return ConstantsDefaultAlertLevels.defaultBatteryAlertLevelDexcomG5
+
         case .medtrumTouchCareNano:
             // No pump-battery surface in xDrip. Reuse the generic threshold so the UI has a sane default.
+            return ConstantsDefaultAlertLevels.defaultBatteryAlertLevelLibre2
+
+        case .Aidex, .sibionicsCN:
             return ConstantsDefaultAlertLevels.defaultBatteryAlertLevelLibre2
 
         }
@@ -325,12 +359,15 @@ enum CGMTransmitterType:String, CaseIterable {
             return ""
         case .Libre2:
             return "%"
-            
+
         case .dexcomG7:
             return "voltB"
 
-        case .medtrumTouchCareNano:
+        case .ottai, .medtrumTouchCareNano, .sibionicsCN:
             return ""
+
+        case .Aidex:
+            return "mV"
 
         }
     }

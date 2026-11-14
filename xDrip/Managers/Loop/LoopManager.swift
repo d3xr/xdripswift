@@ -211,6 +211,8 @@ enum XDripCGMMetadataBuilder {
             case .Dexcom: return "dexcom"
             case .Libre: return "libre"
             case .Medtrum: return "medtrum"
+            case .Aidex: return "aidex"
+            case .SibionicsCN: return "sibionics-cn"
             case nil:
                 let description = model?.lowercased() ?? ""
                 if description.contains("guardian") { return "guardian" }
@@ -294,6 +296,9 @@ enum XDripCGMMetadataBuilder {
         case .miaomiao: return "libre_miaomiao"
         case .Bubble: return "libre_bubble"
         case .medtrumTouchCareNano: return "medtrum_nano"
+        case .ottai: return "ottai_syai"
+        case .Aidex: return "aidex"
+        case .sibionicsCN: return "sibionics-cn"
         case nil: return nil
         }
     }
@@ -312,8 +317,8 @@ enum XDripCGMMetadataBuilder {
 
     private static func directExpectedInterval(_ type: CGMTransmitterType?) -> Double? {
         switch type {
-        case .dexcom, .dexcomG7: return 300
-        case .Libre3, .Libre2, .miaomiao, .Bubble, .medtrumTouchCareNano: return 60
+        case .dexcom, .dexcomG7, .sibionicsCN: return 300
+        case .Libre3, .Libre2, .miaomiao, .Bubble, .medtrumTouchCareNano, .ottai, .Aidex: return 60
         case nil: return nil
         }
     }
@@ -339,10 +344,18 @@ enum XDripCGMMetadataBuilder {
             return .minutes(transmitter?.isAnubisG6() == true
                 ? ConstantsMaster.minimumSensorWarmUpRequiredInMinutesDexcomG6Anubis
                 : ConstantsMaster.minimumSensorWarmUpRequiredInMinutesDexcomG5G6)
+        case .ottai:
+            return .minutes(ConstantsMaster.minimumSensorWarmUpRequiredInMinutesOttai)
+        case .Aidex:
+            return .minutes(ConstantsAidex.warmupMinutes)
+        case .sibionicsCN:
+            return GS1Policy.warmup
         case .Libre3, .Libre2, .miaomiao, .Bubble, .medtrumTouchCareNano:
             return .minutes(ConstantsMaster.minimumSensorWarmUpRequiredInMinutes)
         case nil:
             let description = defaults.activeSensorDescription?.lowercased() ?? ""
+            if description.contains("sibionics gs1 cn") { return GS1Policy.warmup }
+            if ConstantsAidex.matchesModelDescription(description) { return .minutes(ConstantsAidex.warmupMinutes) }
             if description.contains("dexcom") { return .minutes(ConstantsMaster.minimumSensorWarmUpRequiredInMinutesDexcomG5G6) }
             return .minutes(ConstantsMaster.minimumSensorWarmUpRequiredInMinutes)
         }
@@ -961,8 +974,14 @@ public class LoopManager: NSObject {
             return ConstantsLibreLinkUp.sensorWarmUpRequiredInMinutesForLibre
         }
 
+        if UserDefaults.standard.isMaster,
+           let minutes = metadataContextProvider().transmitter?.sensorWarmupDurationInMinutes() {
+            return minutes
+        }
         let description = UserDefaults.standard.activeSensorDescription?.lowercased() ?? ""
 
+        if description.contains("sibionics gs1 cn") { return GS1Policy.warmup / 60 }
+        if ConstantsAidex.matchesModelDescription(description) { return ConstantsAidex.warmupMinutes }
         if description.contains("dexcom") {
             return activeSensorIsAnubisProvider()
                 ? ConstantsMaster.minimumSensorWarmUpRequiredInMinutesDexcomG6Anubis

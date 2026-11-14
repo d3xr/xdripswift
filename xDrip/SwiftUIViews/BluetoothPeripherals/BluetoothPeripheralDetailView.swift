@@ -128,6 +128,18 @@ struct BluetoothPeripheralDetailView: View {
             }
         }
         .alert(item: $state.pendingAlert, content: makeAlert)
+        .sheet(isPresented: Binding<Bool>(
+            get: { state.discoveredAidexDevices != nil },
+            set: { if !$0 { state.discoveredAidexDevices = nil } }
+        )) {
+            if let devices = state.discoveredAidexDevices {
+                AidexDevicePickerView(
+                    devices: devices,
+                    onSelect: { state.selectAidexDevice($0) },
+                    onCancel: { state.discoveredAidexDevices = nil }
+                )
+            }
+        }
         .onAppear {
             state.start()
             state.setSignalStrengthVisible(true)
@@ -340,12 +352,21 @@ struct BluetoothPeripheralTextEntryView: View {
             }
 
             Section {
-                TextField(textEntry.placeholder ?? "", text: $text)
-                    .keyboardType(textEntry.keyboardType)
-                    .textInputAutocapitalization(textEntry.textInputAutocapitalization)
-                    .autocorrectionDisabled()
-                    .submitLabel(.done)
-                    .onSubmit(submit)
+                if textEntry.isSecureTextEntry {
+                    SecureField(textEntry.placeholder ?? "", text: $text)
+                        .keyboardType(textEntry.keyboardType)
+                        .textInputAutocapitalization(textEntry.textInputAutocapitalization)
+                        .autocorrectionDisabled()
+                        .submitLabel(.done)
+                        .onSubmit(submit)
+                } else {
+                    TextField(textEntry.placeholder ?? "", text: $text)
+                        .keyboardType(textEntry.keyboardType)
+                        .textInputAutocapitalization(textEntry.textInputAutocapitalization)
+                        .autocorrectionDisabled()
+                        .submitLabel(.done)
+                        .onSubmit(submit)
+                }
             }
 
             if let validationMessage {
@@ -389,10 +410,12 @@ struct BluetoothPeripheralTextEntryView: View {
 
         // Ignore another tap while the next screen is opening.
         hasSubmitted = true
-        textEntry.actionHandler(text)
+        // Close this entry before the handler: close() pops the last pushed view, and a handler
+        // that opens the next step (email -> password, phone -> SMS code) pushes a new one.
         if textEntry.dismissAfterSubmit {
             close()
         }
+        textEntry.actionHandler(text)
     }
 }
 

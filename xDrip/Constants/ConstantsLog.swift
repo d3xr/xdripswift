@@ -41,7 +41,10 @@ enum ConstantsLog {
     
     /// Libre2
     static let categoryCGMLibre2 =                          "Libre2                        "
-    
+
+    /// Ottai / Syai CGM
+    static let categoryCGMOttai =                           "CGMOttai                      "
+
     /// core data manager
     static let categoryCoreDataManager =                    "CoreDataManager               "
 
@@ -222,4 +225,7 @@ enum ConstantsLog {
     
     /// for use in Omni¨PodHeartBeatTransmitter
     static let categoryHeartBeatOmnipod =                   "HeartBeatOmnipod              "
+
+    /// for use in Aidex CGM transmitter
+    static let categoryAidex =                              "CGMAidex                      "
 }

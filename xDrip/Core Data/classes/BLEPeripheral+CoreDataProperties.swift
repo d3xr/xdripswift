@@ -51,7 +51,10 @@ extension BLEPeripheral {
     // a BLEPeripheral should only have one of dexcomG5, m5Stack, ...
     @NSManaged public var libre3: Libre3?
     @NSManaged public var libre2: Libre2?
-    
+
+    // a BLEPeripheral should only have one of dexcomG5, m5Stack, ...
+    @NSManaged public var ottai: Ottai?
+
     // a BLEPeripheral should only have one of dexcomG5, m5Stack, ...
     @NSManaged public var libre2heartbeat: Libre2HeartBeat?
 
@@ -66,6 +69,10 @@ extension BLEPeripheral {
 
     // a BLEPeripheral should only have one of dexcomG5, m5Stack, ...
     @NSManaged public var medtrumTouchCareNano: MedtrumTouchCareNano?
+
+    // a BLEPeripheral should only have one of dexcomG5, m5Stack, ...
+    @NSManaged public var aidex: Aidex?
+    @NSManaged public var sibionicsCN: SibionicsCN?
     
     /// sensorSerialNumber of last sensor that was read
     @NSManaged public var sensorSerialNumber: String?

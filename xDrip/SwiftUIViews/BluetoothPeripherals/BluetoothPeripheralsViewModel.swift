@@ -605,7 +605,10 @@ extension BluetoothPeripheralType {
             .DexcomG7Type,
             .MiaoMiaoType,
             .BubbleType,
-            .MedtrumTouchCareNanoType
+            .MedtrumTouchCareNanoType,
+            .OttaiType,
+            .AidexType,
+            .SibionicsCNType
         ]
     ]
 }

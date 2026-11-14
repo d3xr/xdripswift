@@ -1,6 +1,20 @@
 import Foundation
 import CoreBluetooth
 
+/// Invalidates queued deliveries synchronously when a connection or CGM source changes.
+final class CGMDeliveryGate {
+    private let lock = NSLock()
+    private var generation: UInt64 = 0
+    private var stopped = false
+    private var released = false
+    func token() -> UInt64? { lock.lock(); defer { lock.unlock() }; return stopped ? nil : generation }
+    func allows(_ token: UInt64) -> Bool { lock.lock(); defer { lock.unlock() }; return !stopped && token == generation }
+    func invalidate() { lock.lock(); generation &+= 1; lock.unlock() }
+    func stop() { lock.lock(); stopped = true; generation &+= 1; lock.unlock() }
+    func release() { lock.lock(); released = true; stopped = true; generation &+= 1; lock.unlock() }
+    var isReleased: Bool { lock.lock(); defer { lock.unlock() }; return released }
+}
+
 /// to be implemented for anyone who needs to receive information from a specific type of cgm transmitter
 protocol CGMTransmitterDelegate:AnyObject {
      
@@ -36,6 +50,10 @@ protocol CGMTransmitterDelegate:AnyObject {
     /// Dexcom G6/ONE provides this callback. The default implementation does nothing.
     func sensorSessionConfirmed(startDate: Date)
 
+    /// An original session anchor corroborated by contiguous, current sensor history.
+    /// This is metadata only; it does not imply that a glucose result is available.
+    func sensorSessionObserved(startDate: Date, from transmitter: CGMTransmitter)
+
     /// Reports G6/ONE calibration stages after reconciling the transmitter's session date.
     func dexcomG6CalibrationStateReceived(_ state: DexcomAlgorithmState, sensorStartDate: Date, from transmitter: CGMG5Transmitter)
     
@@ -45,5 +63,6 @@ extension CGMTransmitterDelegate {
     func sensorHealthEventOccurred(_ event: CGMSensorHealthEvent) {}
     func sensorSessionStartResultReceived(_ result: CGMSensorSessionStartResult) {}
     func sensorSessionConfirmed(startDate: Date) {}
+    func sensorSessionObserved(startDate: Date, from transmitter: CGMTransmitter) {}
     func dexcomG6CalibrationStateReceived(_ state: DexcomAlgorithmState, sensorStartDate: Date, from transmitter: CGMG5Transmitter) {}
 }

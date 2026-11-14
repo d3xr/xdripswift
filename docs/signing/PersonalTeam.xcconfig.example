@@ -1,0 +1,6 @@
+// Copy to the ignored root xDripConfigOverride.xcconfig for a Personal Team.
+// Also copy PersonalTeam.entitlements.example to xDripPersonalTeam.entitlements.
+XDRIP_DEVELOPMENT_TEAM = YOURTEAMID
+XDRIP_ENTITLEMENTS_DEBUG = xDripPersonalTeam.entitlements
+XDRIP_ENTITLEMENTS_RELEASE = xDripPersonalTeam.entitlements
+OTTAI_NFC_WAKE_ENABLED = NO

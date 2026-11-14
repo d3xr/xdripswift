@@ -96,6 +96,7 @@ enum OnlineHelpTopic: CaseIterable, Hashable {
     case libre2
     case libreTransmitters
     case medtrumNano
+    case aidex
     case followerHeartbeat
     case m5Stack
 
@@ -167,6 +168,8 @@ enum OnlineHelpTopic: CaseIterable, Hashable {
             return "connect/libreTransmitters/"
         case .medtrumNano:
             return "connect/medtrum/"
+        case .aidex:
+            return "connect/aidex/"
         case .followerHeartbeat:
             return "connect/followerHeartbeat/"
         case .m5Stack:
@@ -396,8 +399,16 @@ extension BluetoothPeripheralType {
             return .dexcomG7OnePlusStelo
         case .Libre3HeartBeatType, .DexcomG7HeartBeatType, .OmniPodHeartBeatType:
             return .followerHeartbeat
+        case .OttaiType:
+            // No dedicated documentation page exists for the Ottai/Syai driver, so fall back to
+            // the generic "add a direct CGM" overview.
+            return .addDirectCGM
         case .MedtrumTouchCareNanoType:
             return .medtrumNano
+        case .AidexType:
+            return .aidex
+        case .SibionicsCNType:
+            return .addDirectCGM
         }
     }
 }

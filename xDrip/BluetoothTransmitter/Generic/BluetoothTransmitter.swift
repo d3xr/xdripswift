@@ -120,10 +120,10 @@ class BluetoothTransmitter: NSObject, CBCentralManagerDelegate, CBPeripheralDele
     private var shouldReconnectOnNextDisconnect = true
     
     /// the address of the transmitter. If nil then transmitter never connected, so we don't know the address.
-    private(set) var deviceAddress:String?
+    internal(set) var deviceAddress:String?
     
     /// the name of the transmitter. If nil then transmitter never connected, so we don't know the name
-    private(set) var deviceName:String?
+    internal(set) var deviceName:String?
     
     /// uuid used for scanning, can be empty string, if empty string then scan all devices - only possible if app is in foreground
     private let CBUUID_Advertisement:String?
@@ -388,6 +388,13 @@ class BluetoothTransmitter: NSObject, CBCentralManagerDelegate, CBPeripheralDele
                 forget()
             }
         }
+    }
+
+    /// Subclasses can refuse a discovered peripheral (return false to keep scanning).
+    /// Used by drivers that must move away from a wrong physical device that has the
+    /// same name and advertisement as the right one (e.g. an old Ottai/Syai sensor).
+    func shouldConnectToDiscoveredPeripheral(_ peripheral: CBPeripheral) -> Bool {
+        return true
     }
 
     /// stops scanning
@@ -723,6 +730,12 @@ class BluetoothTransmitter: NSObject, CBCentralManagerDelegate, CBPeripheralDele
             deviceName = temp
         }
         trace("in didDiscover, found peripheral with name: %{public}@", log: log, category: ConstantsLog.categoryBlueToothTransmitter, type: .info, String(describing: deviceName))
+        
+        // give the subclass a chance to refuse this device (e.g. a wrong physical sensor with the same name)
+        guard shouldConnectToDiscoveredPeripheral(peripheral) else {
+            trace("in didDiscover, subclass refused peripheral %{public}@, keep scanning", log: log, category: ConstantsLog.categoryBlueToothTransmitter, type: .info, peripheral.identifier.uuidString)
+            return
+        }
         
         // check if stored address not nil, in which case we already connected before and we expect a full match with the already known device name
         if let deviceAddress = deviceAddress {
