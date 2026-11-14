@@ -1,6 +1,20 @@
 import Foundation
 import CoreBluetooth
 
+/// Invalidates queued deliveries synchronously when a connection or CGM source changes.
+final class CGMDeliveryGate {
+    private let lock = NSLock()
+    private var generation: UInt64 = 0
+    private var stopped = false
+    private var released = false
+    func token() -> UInt64? { lock.lock(); defer { lock.unlock() }; return stopped ? nil : generation }
+    func allows(_ token: UInt64) -> Bool { lock.lock(); defer { lock.unlock() }; return !stopped && token == generation }
+    func invalidate() { lock.lock(); generation &+= 1; lock.unlock() }
+    func stop() { lock.lock(); stopped = true; generation &+= 1; lock.unlock() }
+    func release() { lock.lock(); released = true; stopped = true; generation &+= 1; lock.unlock() }
+    var isReleased: Bool { lock.lock(); defer { lock.unlock() }; return released }
+}
+
 /// to be implemented for anyone who needs to receive information from a specific type of cgm transmitter
 protocol CGMTransmitterDelegate:AnyObject {
      

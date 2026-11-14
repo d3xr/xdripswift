@@ -9,6 +9,8 @@ final class OttaiRegionalTransportTests: XCTestCase {
 
     /// Synthetic server independently derives ECDH keys and authenticates the production HTTP request.
     private final class Server {
+        let cn: Bool
+        init(cn: Bool = false) { self.cn = cn }
         var exchanges = 0, applications = 0
         var owners: [String] = [], clientKeys: [String] = []
         var urls: [String] = [], methods: [String] = []
@@ -27,7 +29,12 @@ final class OttaiRegionalTransportTests: XCTestCase {
             if parts.path.hasSuffix("/security/exchangeKey") {
                 exchanges += 1
                 if failExchange { throw OttaiSecureTransportFailure(diagnostic: "synthetic-network") }
-                owner = try XCTUnwrap(headers["webDeviceId"])
+                if cn {
+                    // Pin CN exchange gets deviceId; cipherUserId appears only on application requests.
+                    XCTAssertNil(headers["webDeviceId"])
+                    XCTAssertNil(headers["cipherUserId"])
+                    owner = try XCTUnwrap(headers["deviceId"])
+                } else { owner = try XCTUnwrap(headers["webDeviceId"]) }
                 owners.append(owner)
                 let request = try JSONSerialization.jsonObject(with: Data(XCTUnwrap(body).utf8)) as! [String: Any]
                 let x = request["clientPubKeyX"] as! String, y = request["clientPubKeyY"] as! String
@@ -48,6 +55,10 @@ final class OttaiRegionalTransportTests: XCTestCase {
             }
             applications += 1; methods.append(method)
             if failRequest { throw OttaiSecureTransportFailure(diagnostic: "synthetic-network") }
+            if cn {
+                XCTAssertEqual(headers["cipherUserId"], owner)
+                XCTAssertNil(headers["webDeviceId"])
+            } else { XCTAssertEqual(headers["webDeviceId"], owner) }
             XCTAssertEqual(headers["cipherSecretId"], secret)
             XCTAssertEqual(headers["cipherSeq"], "1", "A new HTTP operation owns a fresh channel")
             var envelope: [String: String] = [:]
@@ -199,6 +210,45 @@ final class OttaiRegionalTransportTests: XCTestCase {
         XCTAssertFalse(message.contains("123"))
         XCTAssertFalse(message.contains("secret"))
         XCTAssertFalse(message.contains("\n"))
+    }
+
+    func testCNPhoneBootstrapUsesEncryptedGatewayAndItsDistinctOwnerHeader() throws {
+        let server = Server(cn: true)
+        let cnHeaders = ["deviceId": "ottai:a:synthetic-cn-install", "appName": "ottai", "packageName": "com.ottai.tag",
+                         "timestamp": "1793000000123", "Authorization": "synthetic-cn-account", "versionName": "1.55.0", "versionCode": "263121"]
+        for path in ["/device/validateDeviceByMacV3", "/cgmAuth/verify", "/deviceBind/composite/bindV3"] {
+            _ = try OttaiRegionalTransport.request("POST", url: "https://api.ottai.com/cgm/app/server" + path,
+                body: "{\"mac\":\"AABBCCDDEEFF\",\"sign\":\"synthetic-proof\"}", headers: cnHeaders, send: server.send)
+        }
+        XCTAssertEqual(server.exchanges, 3)
+        XCTAssertEqual(server.applications, 3)
+        XCTAssertTrue(server.urls.allSatisfy { $0.hasPrefix("https://api.ottai.com/cgm/security/app/server/") })
+        XCTAssertTrue(server.received.allSatisfy { $0["sign"] as? String == "synthetic-proof" })
+        for h in server.allHeaders {
+            XCTAssertEqual(h["deviceId"], cnHeaders["deviceId"])
+            XCTAssertEqual(h["Authorization"], cnHeaders["Authorization"])
+            XCTAssertEqual(h["timestamp"], cnHeaders["timestamp"])
+            XCTAssertEqual(h["versionName"], "1.63.0")
+            XCTAssertEqual(h["versionCode"], "264122")
+        }
+    }
+
+    func testCNPhoneGatewayFailureNeverFallsBackToPlaintextAndUnsafeTargetsFail() {
+        let cnHeaders = ["deviceId": "synthetic-cn", "appName": "ottai", "packageName": "com.ottai.tag"]
+        let server = Server(cn: true); server.failExchange = true
+        XCTAssertThrowsError(try OttaiRegionalTransport.request("POST", url: "https://api.ottai.com/cgm/app/server/cgmAuth/verify",
+            body: "{}", headers: cnHeaders, send: server.send))
+        XCTAssertEqual(server.urls.count, 1)
+        XCTAssertTrue(server.urls[0].contains("/cgm/security/app/server/"))
+        for url in ["http://api.ottai.com/cgm/app/server/user/getUser", "https://user@api.ottai.com/cgm/app/server/user/getUser",
+                    "https://api.ottai.com:443/cgm/app/server/user/getUser", "https://api.ottai.com/cgm/app/server/user/getUser#fragment"] {
+            XCTAssertThrowsError(try OttaiRegionalTransport.route(url, headers: cnHeaders))
+        }
+        for url in ["https://user@api.ottai.com/cgm/security/app/server/user/getUser",
+                    "https://api.ottai.com/cgm/security/app/server/user/getUser#fragment",
+                    "https://api.ottai.com/cgm/app/server/user/getUser"] {
+            XCTAssertThrowsError(try OttaiSecureHTTP.send("GET", url: url, body: nil, headers: cnHeaders))
+        }
     }
 
 }

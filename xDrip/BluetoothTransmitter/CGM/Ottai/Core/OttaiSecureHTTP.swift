@@ -9,7 +9,8 @@ enum OttaiSecureHTTP {
     }
 
     static func send(_ method: String, url: String, body: String?, headers: [String: String], timeoutMs: Int = 30_000) throws -> OttaiNetSecurity.Reply {
-        guard let target = URL(string: url), target.scheme == "https", target.host == "seas.ottai.com",
+        guard let target = URL(string: url), target.scheme == "https", ["seas.ottai.com", "api.ottai.com"].contains(target.host ?? ""),
+              target.user == nil, target.password == nil, target.fragment == nil,
               target.port == nil, target.path.hasPrefix("/cgm/security/app/server/") else {
             throw OttaiSecureTransportFailure(diagnostic: "secure_http_target")
         }

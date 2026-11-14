@@ -20,6 +20,20 @@ func normalizeOttaiActiveTimeMs(_ value: Int64) -> Int64 {
 
 enum OttaiRegistry {
 
+    enum LifetimeEvidence: String {
+        case legacy
+        case writeAcknowledged
+        case sensorReadback
+
+        var detail: String {
+            switch self {
+            case .legacy: return "saved parameter; source not confirmed"
+            case .writeAcknowledged: return "requested duration; write acknowledged, not read back"
+            case .sensorReadback: return "duration parameter read from the sensor"
+            }
+        }
+    }
+
     enum SessionProfile: String {
         case watch = "WATCH"
         case cnPhone = "CN_PHONE"
@@ -54,6 +68,7 @@ enum OttaiRegistry {
         static let provisionalActiveTimePrefix = "ottai_provisional_active_time_"
         static let activeExpirePrefix = "ottai_active_expire_"
         static let acceptedMaxActivePrefix = "ottai_accepted_max_active_"
+        static let lifetimeEvidencePrefix = "ottai_lifetime_evidence_"
         static let preheatPeriodPrefix = "ottai_preheat_period_"
         static let gracePeriodPrefix = "ottai_grace_period_"
         static let calibrationKPrefix = "ottai_factory_calibration_k_"
@@ -72,9 +87,12 @@ enum OttaiRegistry {
         static let activationAttemptedPrefix = "ottai_act_tried_"
         static let activationCheckpointPrefix = "ottai_activation_checkpoint_"
         static let activationStatusPrefix = "ottai_activation_status_"
+        static let activationStartedPrefix = "ottai_activation_started_"
+        static let sensorStatusPrefix = "ottai_sensor_status_"
         static let v3BootstrapPendingPrefix = "ottai_v3_bootstrap_pending_"
         // xDrip only: start time of a server-activated sensor that is not bound yet
         static let pendingBindPrefix = "ottai_pending_bind_"
+        static let preparationPrefix = "ottai_legacy_preparation_"
         static func validatedVersion(_ id: String) -> String { "ottai_v3_validated_version_\(id)" }
     }
 
@@ -84,6 +102,7 @@ enum OttaiRegistry {
 
     private static var d: UserDefaults { UserDefaults.standard }
     private static let accountLock = NSRecursiveLock()
+    private static let preparationLock = NSRecursiveLock()
 
     // MARK: - decrypted per-sensor materials
 
@@ -100,6 +119,14 @@ enum OttaiRegistry {
         var gracePeriodMs: Int64 = 0
         var calibrationValueK: Double?
         var calibrationValueB: Double?
+        var calibrationK: Double? {
+            get { calibrationValueK }
+            set { calibrationValueK = newValue }
+        }
+        var calibrationB: Double? {
+            get { calibrationValueB }
+            set { calibrationValueB = newValue }
+        }
 
         var authKeys: [[UInt8]]? { OttaiCrypto.parseAuthKeys(keyAHex) }
 
@@ -205,6 +232,18 @@ enum OttaiRegistry {
 
     static func isCurrent(_ context: OttaiAccountContext, in defaults: UserDefaults = .standard) -> Bool {
         accountContext(in: defaults) == context
+    }
+
+    /// Commit a Syai refresh only while its original account still owns the session.
+    static func commitRefreshedSyaiSession(_ expected: OttaiAccountContext, accessToken: String,
+                                          refreshToken: String?, glucoseSecretKey: String?) -> Bool {
+        accountLock.lock(); defer { accountLock.unlock() }
+        guard expected.apiBase == OttaiConstants.apiBaseSyai, !expected.userId.isEmpty,
+              accountContext() == expected, !accessToken.isEmpty else { return false }
+        setOrRemove(K.accessToken, accessToken)
+        if let refreshToken, !refreshToken.isEmpty { setOrRemove(K.refreshToken, refreshToken) }
+        if let glucoseSecretKey, !glucoseSecretKey.isEmpty { setOrRemove(K.glucoseSecret, glucoseSecretKey) }
+        return true
     }
 
     /// Starting a candidate does not clear the previous session or any sensor materials.
@@ -347,6 +386,52 @@ enum OttaiRegistry {
     }
 
     static func activationStatus(_ id: String) -> String? { d.string(forKey: K.activationStatusPrefix + canonical(id)) }
+    static func activationStarted(_ id: String) -> Bool {
+        d.bool(forKey: K.activationStartedPrefix + canonical(id))
+    }
+
+    static func markActivationStarted(_ id: String) {
+        d.set(true, forKey: K.activationStartedPrefix + canonical(id))
+        setActivationAttempted(id, false)
+    }
+
+    static func sensorStatus(_ id: String) -> Int {
+        (d.object(forKey: K.sensorStatusPrefix + canonical(id)) as? Int) ?? -1
+    }
+
+    static func saveSensorStatus(_ id: String, _ status: Int) {
+        guard status >= 3 else { return }
+        d.set(status, forKey: K.sensorStatusPrefix + canonical(id))
+        markActivationStarted(id)
+    }
+
+    struct PreparationCheckpoint {
+        let version: String
+        let address: String
+    }
+
+    static func preparation(_ id: String) -> PreparationCheckpoint? {
+        preparationLock.lock(); defer { preparationLock.unlock() }
+        // The older donor checkpoint used a dictionary at the same key where the
+        // account-bound checkpoint now stores Data. Never overwrite that durable intent.
+        guard let saved = d.dictionary(forKey: K.preparationPrefix + canonical(id))
+                ?? d.dictionary(forKey: "ottai_preparation_" + canonical(id)),
+              let version = saved["version"] as? String,
+              let address = saved["address"] as? String else { return nil }
+        return PreparationCheckpoint(version: version, address: address)
+    }
+
+    static func savePreparation(_ id: String, version: String, address: String) {
+        preparationLock.lock(); defer { preparationLock.unlock() }
+        d.set(["version": version, "address": address], forKey: K.preparationPrefix + canonical(id))
+    }
+
+    static func clearPreparation(_ id: String) {
+        preparationLock.lock(); defer { preparationLock.unlock() }
+        d.removeObject(forKey: K.preparationPrefix + canonical(id))
+        let legacyKey = "ottai_preparation_" + canonical(id)
+        if d.dictionary(forKey: legacyKey) != nil { d.removeObject(forKey: legacyKey) }
+    }
 
     // MARK: - materials
 
@@ -400,8 +485,8 @@ enum OttaiRegistry {
             retainTimeMs: int64(K.retainTimePrefix + id),
             preheatPeriodMs: int64(K.preheatPeriodPrefix + id),
             gracePeriodMs: int64(K.gracePeriodPrefix + id),
-            calibrationValueK: (d.object(forKey: K.calibrationKPrefix + id) as? NSNumber)?.doubleValue,
-            calibrationValueB: (d.object(forKey: K.calibrationBPrefix + id) as? NSNumber)?.doubleValue
+            calibrationValueK: ((d.object(forKey: K.calibrationKPrefix + id) ?? d.object(forKey: "ottai_preparation_k_" + id)) as? NSNumber)?.doubleValue,
+            calibrationValueB: ((d.object(forKey: K.calibrationBPrefix + id) ?? d.object(forKey: "ottai_preparation_b_" + id)) as? NSNumber)?.doubleValue
         )
     }
 
@@ -421,8 +506,100 @@ enum OttaiRegistry {
         int64(K.acceptedMaxActivePrefix + canonical(id))
     }
 
-    static func saveAcceptedMaxActive(_ id: String, _ durationMs: Int64) {
+    static func saveAcceptedMaxActive(_ id: String, _ durationMs: Int64, evidence: LifetimeEvidence = .legacy) {
         d.set(NSNumber(value: durationMs), forKey: K.acceptedMaxActivePrefix + canonical(id))
+        d.set(["durationMs": NSNumber(value: durationMs), "source": evidence.rawValue], forKey: K.lifetimeEvidencePrefix + canonical(id))
+    }
+
+    static func lifetimeEvidence(_ id: String) -> LifetimeEvidence {
+        guard let value = d.dictionary(forKey: K.lifetimeEvidencePrefix + canonical(id)),
+              (value["durationMs"] as? NSNumber)?.int64Value == loadAcceptedMaxActive(id),
+              let source = value["source"] as? String,
+              let evidence = LifetimeEvidence(rawValue: source) else { return .legacy }
+        return evidence
+    }
+
+    static func savePreparationCheckpoint(_ checkpoint: OttaiPreparationCheckpoint, in defaults: UserDefaults = .standard) -> Bool {
+        preparationLock.lock(); defer { preparationLock.unlock() }
+        guard OttaiConstants.looksLikeMac(checkpoint.sensorID), UUID(uuidString: checkpoint.bluetoothID) != nil,
+              !checkpoint.apiBase.isEmpty, !checkpoint.userID.isEmpty, checkpoint.authorizedAtMs > 0,
+              (!checkpoint.materialsSaved || checkpoint.bindAttempted || checkpoint.storedMaterials),
+              (!checkpoint.factoryComplete || checkpoint.materialsSaved),
+              let data = try? JSONEncoder().encode(checkpoint) else { return false }
+        defaults.set(data, forKey: "ottai_preparation_" + canonical(checkpoint.sensorID))
+        return defaults.synchronize()
+    }
+
+    static func hasPreparationCheckpoint(_ id: String, in defaults: UserDefaults = .standard) -> Bool {
+        preparationLock.lock(); defer { preparationLock.unlock() }
+        migrateLegacyPreparation(id, in: defaults)
+        return defaults.object(forKey: "ottai_preparation_" + canonical(id)) != nil
+    }
+
+    static func loadPreparationCheckpoint(_ id: String, in defaults: UserDefaults = .standard) -> OttaiPreparationCheckpoint? {
+        preparationLock.lock(); defer { preparationLock.unlock() }
+        migrateLegacyPreparation(id, in: defaults)
+        guard let data = defaults.data(forKey: "ottai_preparation_" + canonical(id)),
+              let checkpoint = try? JSONDecoder().decode(OttaiPreparationCheckpoint.self, from: data),
+              checkpoint.sensorID == canonical(id), UUID(uuidString: checkpoint.bluetoothID) != nil,
+              !checkpoint.apiBase.isEmpty, !checkpoint.userID.isEmpty, checkpoint.authorizedAtMs > 0,
+              (!checkpoint.materialsSaved || checkpoint.bindAttempted || checkpoint.storedMaterials),
+              (!checkpoint.factoryComplete || checkpoint.materialsSaved) else { return nil }
+        return checkpoint
+    }
+
+    /// Old donor builds stored only firmware and a physical BLE UUID. Preserve
+    /// those hints separately; they never authorize bind, factory writes or activation.
+    /// An unreadable Data checkpoint stays in place and continues to fail closed.
+    private static func migrateLegacyPreparation(_ id: String, in defaults: UserDefaults) {
+        let sensorID = canonical(id)
+        let oldKey = "ottai_preparation_" + sensorID
+        guard OttaiConstants.looksLikeMac(sensorID),
+              let legacy = defaults.object(forKey: oldKey) as? [String: Any],
+              let version = legacy["version"] as? String,
+              !version.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              let address = legacy["address"] as? String, UUID(uuidString: address) != nil else { return }
+        defaults.set(["version": version, "address": address], forKey: K.preparationPrefix + sensorID)
+        // Keep the original on disk if persistence cannot be confirmed. The next
+        // explicit setup can create its own account-bound checkpoint after migration.
+        guard defaults.synchronize() else { return }
+        defaults.removeObject(forKey: oldKey)
+        _ = defaults.synchronize()
+    }
+
+    static func saveLifetimeIntent(_ intent: OttaiLifetimeIntent, in defaults: UserDefaults = .standard) -> Bool {
+        guard OttaiConstants.looksLikeMac(intent.sensorID), UUID(uuidString: intent.bluetoothID) != nil,
+              intent.targetMs == OttaiConstants.extendedLifetimeMs, intent.requestedAtMs > 0,
+              !intent.apiBase.isEmpty, !intent.userID.isEmpty,
+              let data = try? JSONEncoder().encode(intent) else { return false }
+        defaults.set(data, forKey: "ottai_lifetime_intent_" + canonical(intent.sensorID))
+        return defaults.synchronize()
+    }
+
+    static func loadLifetimeIntent(_ id: String, in defaults: UserDefaults = .standard) -> OttaiLifetimeIntent? {
+        guard let data = defaults.data(forKey: "ottai_lifetime_intent_" + canonical(id)) else { return nil }
+        guard let intent = try? JSONDecoder().decode(OttaiLifetimeIntent.self, from: data),
+              intent.sensorID == canonical(id), OttaiConstants.looksLikeMac(intent.sensorID),
+              UUID(uuidString: intent.bluetoothID) != nil, intent.targetMs == OttaiConstants.extendedLifetimeMs,
+              intent.requestedAtMs > 0, !intent.apiBase.isEmpty, !intent.userID.isEmpty else { return nil }
+        return intent
+    }
+
+    static func hasLifetimeIntent(_ id: String, in defaults: UserDefaults = .standard) -> Bool {
+        defaults.object(forKey: "ottai_lifetime_intent_" + canonical(id)) != nil
+    }
+
+    static func clearLifetimeIntent(_ id: String, in defaults: UserDefaults = .standard) {
+        defaults.removeObject(forKey: "ottai_lifetime_intent_" + canonical(id))
+        defaults.synchronize()
+    }
+
+    static func saveLifetimeStatus(_ id: String, _ status: String) {
+        d.set(status, forKey: "ottai_lifetime_status_" + canonical(id))
+    }
+
+    static func lifetimeStatus(_ id: String) -> String? {
+        d.string(forKey: "ottai_lifetime_status_" + canonical(id))
     }
 
     static func loadLastDataNo(_ id: String) -> Int {
@@ -498,7 +675,7 @@ enum OttaiRegistry {
         for prefix in [K.keyAPrefix, K.methodPrefix, K.coeffPrefix, K.activeTimePrefix,
                        K.provisionalActiveTimePrefix, K.activeExpirePrefix, K.retainTimePrefix,
                        K.preheatPeriodPrefix, K.gracePeriodPrefix, K.calibrationKPrefix, K.calibrationBPrefix, K.deviceVersionPrefix, K.lastDataNoPrefix, K.deliveredDataNoPrefix, K.recordSizePrefix,
-                       K.deviceIdPrefix, K.activationAttemptedPrefix, K.activationCheckpointPrefix, K.activationStatusPrefix, K.v3BootstrapPendingPrefix, K.pendingBindPrefix] {
+                       K.deviceIdPrefix, K.activationAttemptedPrefix, K.activationCheckpointPrefix, K.activationStatusPrefix, K.activationStartedPrefix, K.sensorStatusPrefix, K.preparationPrefix, K.v3BootstrapPendingPrefix, K.pendingBindPrefix] {
             d.removeObject(forKey: prefix + id)
         }
         d.removeObject(forKey: K.validatedVersion(id))

@@ -110,6 +110,64 @@ enum OttaiGlobalContract {
         return .success(merged)
     }
 
+    /// Fresh preparation from ctqvva/JugglucoNG@91fed63ffb83b5b002186a8574b4af696c3839f9,
+    /// OttaiOtaPackage.kt:73-140. Parse the entire application/composite spelling,
+    /// not a V-profile substring embedded in arbitrary text. Numbers remain unbounded.
+    private struct PreparationRevision {
+        let raw: String
+        let numbers: [String]
+        let build: String
+        let composite: Bool
+    }
+
+    private static func preparationRevision(_ value: String) -> PreparationRevision? {
+        // 2a28 is a C string: stale bytes after its first NUL are not revision text.
+        let raw = String(value.prefix { $0 != "\0" }).trimmingCharacters(in: CharacterSet(charactersIn: " "))
+        guard (1...512).contains(raw.utf8.count), raw.unicodeScalars.allSatisfy({ (32...126).contains($0.value) }) else { return nil }
+        func entire(_ pattern: String, _ text: String) -> NSTextCheckingResult? {
+            guard let regex = try? NSRegularExpression(pattern: pattern),
+                  let match = regex.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)),
+                  match.range == NSRange(text.startIndex..., in: text) else { return nil }
+            return match
+        }
+        let compositePattern = #"[Vv]?[Ee][0-9]+(?:\.[0-9]+)*\(([Vv][^()]+)\)(?:,[A-Za-z0-9._+-]+)?"#
+        let compositeMatch = entire(compositePattern, raw)
+        let application: String
+        if let match = compositeMatch, let range = Range(match.range(at: 1), in: raw) { application = String(raw[range]) }
+        else { application = raw }
+        let pattern = #"[Vv]?([0-9]+(?:\.[0-9]+)*)([._+-][A-Za-z0-9][A-Za-z0-9._+-]*)?"#
+        guard let match = entire(pattern, application), let range = Range(match.range(at: 1), in: application) else { return nil }
+        var numbers = application[range].split(separator: ".").map { part -> String in
+            let significant = part.drop { $0 == "0" }
+            return significant.isEmpty ? "0" : String(significant)
+        }
+        while numbers.count > 1 && numbers.last == "0" { numbers.removeLast() }
+        let build = Range(match.range(at: 2), in: application).map { String(application[$0]) } ?? ""
+        return PreparationRevision(raw: raw, numbers: numbers, build: build, composite: compositeMatch != nil)
+    }
+
+    static func preparationVersionMatches(sensor: String, cloud: String) -> Bool {
+        guard let a = preparationRevision(sensor), let b = preparationRevision(cloud) else { return false }
+        if a.raw == b.raw { return true }
+        if a.composite && b.composite {
+            // Do not merge conflicting E builds or two different explicitly named variants.
+            return (!a.raw.contains(",") || !b.raw.contains(",")) && a.raw.split(separator: ",").first == b.raw.split(separator: ",").first
+        }
+        guard a.numbers == b.numbers else { return false }
+        if a.composite != b.composite {
+            let bare = a.composite ? b : a
+            let wrapped = a.composite ? a : b
+            return bare.build.isEmpty || bare.build == wrapped.build
+        }
+        return a.build == b.build
+    }
+
+    /// Fresh OtaClient.bindMaterials sends the full live revision including its variant.
+    /// This differs from the older M8 post-activation SDK's comma-stripping helper.
+    static func preparationBindVersion(_ liveFirmware: String) -> String? {
+        preparationRevision(liveFirmware)?.raw
+    }
+
     static func passwordBody(email: String, password: String, apiToken: String, signature: String) -> [String: Any]? {
         // Preserve the official compact JSON field order, including proper escaping.
         func quoted(_ value: String) -> String? {

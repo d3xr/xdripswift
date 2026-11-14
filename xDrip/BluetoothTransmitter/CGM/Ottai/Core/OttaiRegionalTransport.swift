@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Global-only port of JugglucoNG 11e6e29 OttaiRegionalTransport.kt.
-// Existing China and Syai implementations deliberately keep their own transport.
+// Regional port of JugglucoNG OttaiRegionalTransport.kt. CN phone routing from
+// ctqvva/JugglucoNG@91fed63ffb83b5b002186a8574b4af696c3839f9 (merged CN secure transport PR #755).
+// Syai retains its existing dedicated transport.
 import Foundation
 
 enum OttaiRegionalTransport {
@@ -10,12 +11,15 @@ enum OttaiRegionalTransport {
         let exchangeURL: String
         let path: String
         let query: [String: String]
+        let cn: Bool
     }
 
-    static func route(_ url: String) throws -> Route? {
+    static func route(_ url: String, headers: [String: String] = [:]) throws -> Route? {
         guard let parts = URLComponents(string: url) else { throw OttaiSecureTransportFailure(diagnostic: "secure_url") }
         let prefix = "/cgm/app/server"
-        guard parts.host?.lowercased() == "seas.ottai.com", parts.path.hasPrefix(prefix + "/") else { return nil }
+        let host = parts.host?.lowercased() ?? ""
+        let cn = host == "api.ottai.com" && headers["appName"] == "ottai" && headers["packageName"] == "com.ottai.tag"
+        guard (host == "seas.ottai.com" || cn), parts.path.hasPrefix(prefix + "/") else { return nil }
         guard parts.scheme == "https", parts.port == nil, parts.user == nil, parts.password == nil,
               parts.fragment == nil, !parts.path.contains(".."), !parts.path.contains("?") else {
             throw OttaiSecureTransportFailure(diagnostic: "secure_url")
@@ -32,24 +36,56 @@ enum OttaiRegionalTransport {
             }
             query[try decode(pair[0])] = pair.count == 2 ? try decode(pair[1]) : ""
         }
-        let secureBase = "https://seas.ottai.com/cgm/security/app/server"
+        let secureBase = "https://" + host + "/cgm/security/app/server"
         return Route(secureBase: secureBase, exchangeURL: secureBase + "/security/exchangeKey",
-                     path: String(parts.path.dropFirst(prefix.count)), query: query)
+                     path: String(parts.path.dropFirst(prefix.count)), query: query, cn: cn)
+    }
+
+    /// Compatibility entry for callers that already resolved a route. It delegates
+    /// to the same production codec; no second secure implementation is kept.
+    typealias Reply = (status: Int, json: [String: Any])
+    static func request(_ method: String, route: Route, body: String?, headers: [String: String],
+                        send: @escaping (String, String, String?, [String: String]) throws -> Reply) throws -> Reply {
+        let plainBase = route.secureBase.replacingOccurrences(of: "/cgm/security/app/server", with: "/cgm/app/server")
+        guard var target = URLComponents(string: plainBase + route.path) else {
+            throw OttaiSecureTransportFailure(diagnostic: "secure_url")
+        }
+        if !route.query.isEmpty {
+            let allowed = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")
+            func encode(_ value: String) -> String { value.addingPercentEncoding(withAllowedCharacters: allowed)! }
+            target.percentEncodedQuery = route.query.keys.sorted().map { encode($0) + "=" + encode(route.query[$0]!) }.joined(separator: "&")
+        }
+        guard let url = target.url?.absoluteString else { throw OttaiSecureTransportFailure(diagnostic: "secure_url") }
+        let result = try request(method, url: url, body: body, headers: headers) { verb, target, payload, common in
+            let reply = try send(verb, target, payload, common)
+            return .init(status: reply.status, json: reply.json)
+        }
+        return (result.status, result.json ?? [:])
     }
 
     /// Actual production dispatcher; tests inject HTTP here, without an alternate codec.
     static func request(_ method: String, url: String, body: String?, headers: [String: String], send: @escaping Send) throws -> OttaiNetSecurity.Reply {
-        guard let route = try route(url) else { return try send(method, url, body, headers) }
+        guard let route = try route(url, headers: headers) else { return try send(method, url, body, headers) }
         guard let owner = headers["deviceId"], !owner.isEmpty else { throw OttaiSecureTransportFailure(diagnostic: "secure_identity") }
         var common = headers
         // Compatibility threshold from the official secure client: route and version change together.
-        common["versionCode"] = "10000000"
-        common["webDeviceId"] = owner
+        if route.cn {
+            common["versionName"] = "1.63.0"
+            common["versionCode"] = "264122"
+        } else {
+            common["versionCode"] = "10000000"
+            common["webDeviceId"] = owner
+        }
         let codec = OttaiNetSecurity(owner: owner, exchange: { object in
             var h = common; h["Content-Type"] = "application/json;charset=UTF-8"
             return try send("POST", route.exchangeURL, OttaiNetSecurity.jsonString(object), h)
         }, send: { verb, path, cipherHeaders, query, payload in
-            var h = common.merging(cipherHeaders) { _, new in new }
+            var regionalCipherHeaders = cipherHeaders
+            if route.cn {
+                regionalCipherHeaders.removeValue(forKey: "webDeviceId")
+                regionalCipherHeaders["cipherUserId"] = owner
+            }
+            var h = common.merging(regionalCipherHeaders) { _, new in new }
             if payload != nil { h["Content-Type"] = "application/json;charset=UTF-8" }
             var target = URLComponents(string: route.secureBase + path)!
             if !query.isEmpty {

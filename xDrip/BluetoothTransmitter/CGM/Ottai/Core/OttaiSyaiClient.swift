@@ -35,9 +35,100 @@ enum OttaiSyaiClient {
     static var userId: String { claim("sub") ?? OttaiRegistry.loadUserId() }
 
     private static func claim(_ name: String) -> String? {
-        let token = [OttaiRegistry.loadAccessToken(), OttaiRegistry.loadRefreshToken()].first { !$0.isEmpty }
+        gate.lock(); defer { gate.unlock() }
+        if let context = preparationContext {
+            switch name {
+            case "app_name": return context.appName
+            case "device_id": return context.deviceId
+            case "sub": return context.expected.userId
+            default: break
+            }
+        }
+        let token = [sessionAccessToken, sessionRefreshToken].first { !$0.isEmpty }
         guard let value = token.flatMap({ jwtPayload($0)?[name] as? String }), !value.isEmpty else { return nil }
         return value
+    }
+
+    private final class PreparationContext {
+        let expected: OttaiAccountContext
+        let stillAuthorized: () -> Bool
+        let appName: String
+        let deviceId: String
+        var accessToken: String
+        var refreshToken: String
+
+        init(expected: OttaiAccountContext, stillAuthorized: @escaping () -> Bool,
+             appName: String, deviceId: String, accessToken: String, refreshToken: String) {
+            self.expected = expected
+            self.stillAuthorized = stillAuthorized
+            self.appName = appName
+            self.deviceId = deviceId
+            self.accessToken = accessToken
+            self.refreshToken = refreshToken
+        }
+    }
+
+    // Access only under the recursive session gate. The callback is installed only
+    // for the synchronous operation's lifetime, including all refreshes and retries.
+    private static var preparationContext: PreparationContext?
+    private static var sessionAccessToken: String { preparationContext?.accessToken ?? OttaiRegistry.loadAccessToken() }
+    private static var sessionRefreshToken: String { preparationContext?.refreshToken ?? OttaiRegistry.loadRefreshToken() }
+
+    static func withPreparationContext<T>(_ expected: OttaiAccountContext, stillAuthorized: () -> Bool,
+                                          operation: () -> T) -> T? {
+        gate.lock(); defer { gate.unlock() }
+        return withoutActuallyEscaping(stillAuthorized) { authorized in
+            guard expected.apiBase == base, !expected.userId.isEmpty,
+                  OttaiRegistry.isCurrent(expected), authorized() else {
+                return fail("Syai preparation account or sensor changed")
+            }
+            let access = sessionAccessToken, refresh = sessionRefreshToken
+            let identityToken = access.isEmpty ? refresh : access
+            let claims = jwtPayload(identityToken)
+            let customer = (claims?["sub"] as? String) ?? expected.userId
+            guard customer == expected.userId else { return fail("Syai preparation account does not match its token") }
+            let previous = preparationContext
+            preparationContext = PreparationContext(expected: expected, stillAuthorized: authorized,
+                appName: (claims?["app_name"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? fallbackAppName,
+                deviceId: (claims?["device_id"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? OttaiRegistry.loadOrCreateSyaiInstallDeviceId(),
+                accessToken: access, refreshToken: refresh)
+            defer { preparationContext = previous }
+            guard preparationIsAuthorized() else { return nil }
+            let result = operation()
+            guard preparationIsAuthorized() else { return nil }
+            return result
+        }
+    }
+
+    private static func preparationIsAuthorized() -> Bool {
+        guard let context = preparationContext else { return true }
+        guard OttaiRegistry.isCurrent(context.expected), context.stillAuthorized() else {
+            recordFailure(.init(text: "Syai preparation account or sensor changed"))
+            return false
+        }
+        return true
+    }
+
+    private static func saveRenewedSession(access: String, refresh: String, secret: String) -> Bool {
+        guard preparationIsAuthorized() else { return false }
+        if let context = preparationContext {
+            if let subject = jwtPayload(access)?["sub"] as? String, subject != context.expected.userId {
+                recordFailure(.init(text: "Syai refreshed token belongs to another account"))
+                return false
+            }
+            guard OttaiRegistry.commitRefreshedSyaiSession(context.expected, accessToken: access,
+                    refreshToken: refresh, glucoseSecretKey: secret) else {
+                recordFailure(.init(text: "Syai account changed before saving refreshed credentials"))
+                return false
+            }
+            context.accessToken = access
+            if !refresh.isEmpty { context.refreshToken = refresh }
+        } else {
+            OttaiRegistry.saveAccessToken(access)
+            if !refresh.isEmpty { OttaiRegistry.saveRefreshToken(refresh) }
+            if !secret.isEmpty { OttaiRegistry.saveGlucoseSecretKey(secret) }
+        }
+        return preparationIsAuthorized()
     }
 
     // MARK: - account
@@ -45,7 +136,10 @@ enum OttaiSyaiClient {
     /// GET user/apiToken, then POST user/mail/login. Saves the session.
     static func login(email: String, password: String) -> OttaiCloudClient.LoginResult? {
         gate.lock(); defer { gate.unlock() }
-        clearSession()
+        guard preparationIsAuthorized() else { return nil }
+        if let context = preparationContext {
+            guard email == context.expected.login else { return fail("Syai preparation login changed") }
+        } else { clearSession() }
         let ts = timestamp()
         guard let tokenResp = call("GET", path: "user/apiToken", body: ["signature": md5(appName + deviceId + ts + signKey)],
                                    headers: ["timestamp": ts], authed: false) else { return nil }
@@ -69,12 +163,19 @@ enum OttaiSyaiClient {
         let refresh = str(jwt, "refreshToken")
         guard !access.isEmpty, !refresh.isEmpty else { return fail("no tokens in the login answer") }
 
-        OttaiRegistry.saveApiBase(base)
-        OttaiRegistry.saveSessionProfile(.watch)
-        OttaiRegistry.saveAccessToken(access)
-        OttaiRegistry.saveRefreshToken(refresh)
-        OttaiRegistry.saveGlucoseSecretKey(str(data, "glucoseSecretKey"))
-        OttaiRegistry.saveUserId(str(data, "userId").isEmpty ? userId : str(data, "userId"))
+        guard preparationIsAuthorized() else { return nil }
+        if let context = preparationContext {
+            let responseUser = str(data, "userId").isEmpty ? (jwtPayload(access)?["sub"] as? String ?? "") : str(data, "userId")
+            guard responseUser == context.expected.userId else { return fail("Syai renewed login belongs to another account") }
+            guard saveRenewedSession(access: access, refresh: refresh, secret: str(data, "glucoseSecretKey")) else { return nil }
+        } else {
+            OttaiRegistry.saveApiBase(base)
+            OttaiRegistry.saveSessionProfile(.watch)
+            OttaiRegistry.saveAccessToken(access)
+            OttaiRegistry.saveRefreshToken(refresh)
+            OttaiRegistry.saveGlucoseSecretKey(str(data, "glucoseSecretKey"))
+            OttaiRegistry.saveUserId(str(data, "userId").isEmpty ? userId : str(data, "userId"))
+        }
         Keychain.savePassword(password)
         signedInElsewhere = false
         return OttaiCloudClient.LoginResult(userId: OttaiRegistry.loadUserId(), accessToken: access, glucoseSecretKey: str(data, "glucoseSecretKey"))
@@ -109,7 +210,15 @@ enum OttaiSyaiClient {
                       headers: ["timestamp": ts], productModel: true)
     }
 
-    /// bindV3, with the "binding in progress" mark around it like the app.
+    /// Fetch keys before activation. This API uses seconds and newBindType=2.
+    static func bindForPreparation(mac: String, firmware: String) -> [String: Any]? {
+        authed("POST", path: "deviceBind/composite/bindV3", body: [
+            "mac": mac, "deviceType": "cgm", "deviceVersion": firmware,
+            "userId": userId, "activeTime": nowMs() / 1000, "newBindType": 2,
+        ])
+    }
+
+    /// Mark the sensor as busy, then bind it after activation.
     static func bindV3(mac: String, deviceVersion: String, activeTimeMs: Int64) -> [String: Any]? {
         _ = authed("POST", path: "deviceBind/markDeviceStatus", body: ["mac": mac, "state": 1, "duration": 5])
         let resp = authed("POST", path: "deviceBind/composite/bindV3", body: [
@@ -152,8 +261,12 @@ enum OttaiSyaiClient {
                       headers: ["timestamp": ts], productModel: true)
     }
 
-    static func uploadGlucose(_ body: [String: Any]) -> [String: Any]? {
-        authed("POST", path: uploadPath, body: body, absolute: true)
+    static func uploadGlucose(_ body: [String: Any], expectedUserId: String? = nil) -> [String: Any]? {
+        gate.lock(); defer { gate.unlock() }
+        if let expectedUserId = expectedUserId, userId != expectedUserId {
+            return fail("Syai account changed before upload")
+        }
+        return authed("POST", path: uploadPath, body: body, absolute: true)
     }
 
     // MARK: - session (access token refresh, one retry after an auth error)
@@ -167,10 +280,14 @@ enum OttaiSyaiClient {
     private static func authed(_ method: String, path: String, body: [String: Any], headers: [String: String] = [:],
                                productModel: Bool = false, absolute: Bool = false) -> [String: Any]? {
         gate.lock(); defer { gate.unlock() }
-        guard !OttaiRegistry.loadRefreshToken().isEmpty else { return fail("not signed in to Syai") }
+        guard preparationIsAuthorized() else { return nil }
+        guard !sessionRefreshToken.isEmpty else { return fail("not signed in to Syai") }
         if !accessTokenValid(), !renewSession() { return nil }
+        guard preparationIsAuthorized() else { return nil }
         let reply = send(method, path: path, body: body, headers: headers, productModel: productModel, authed: true, absolute: absolute)
+        guard preparationIsAuthorized() else { return nil }
         if reply.isAuthError, renewSession() {
+            guard preparationIsAuthorized() else { return nil }
             return finish(send(method, path: path, body: body, headers: headers, productModel: productModel, authed: true, absolute: absolute))
         }
         return finish(reply)
@@ -181,28 +298,25 @@ enum OttaiSyaiClient {
     }
 
     private static func accessTokenValid() -> Bool {
-        guard let exp = (jwtPayload(OttaiRegistry.loadAccessToken())?["exp"] as? NSNumber)?.doubleValue else { return false }
+        guard let exp = (jwtPayload(sessionAccessToken)?["exp"] as? NSNumber)?.doubleValue else { return false }
         return exp - Date().timeIntervalSince1970 > 60
     }
 
     /// Refresh the tokens, or sign in again with the saved password.
     private static func renewSession() -> Bool {
-        if signedInElsewhere { return false }
-        var headers = ["customerId": userId, "refreshToken": OttaiRegistry.loadRefreshToken()]
-        if !OttaiRegistry.loadAccessToken().isEmpty { headers["accessToken"] = OttaiRegistry.loadAccessToken() }
+        guard preparationIsAuthorized(), !signedInElsewhere else { return false }
+        var headers = ["customerId": userId, "refreshToken": sessionRefreshToken]
+        if !sessionAccessToken.isEmpty { headers["accessToken"] = sessionAccessToken }
         if let resp = finish(send("POST", path: "jwt/refreshToken", body: [:], headers: headers, productModel: false, authed: true, absolute: false)) {
             let data = resp["data"] as? [String: Any]
             let jwt = (data?["jwtToken"] as? [String: Any]) ?? data
             let access = str(jwt, "accessToken")
             if !access.isEmpty {
-                OttaiRegistry.saveAccessToken(access)
-                if !str(jwt, "refreshToken").isEmpty { OttaiRegistry.saveRefreshToken(str(jwt, "refreshToken")) }
-                if !str(data, "glucoseSecretKey").isEmpty { OttaiRegistry.saveGlucoseSecretKey(str(data, "glucoseSecretKey")) }
-                return true
+                return saveRenewedSession(access: access, refresh: str(jwt, "refreshToken"), secret: str(data, "glucoseSecretKey"))
             }
         }
-        if signedInElsewhere { return false }
-        let email = OttaiRegistry.loadAccountLogin()
+        guard preparationIsAuthorized(), !signedInElsewhere else { return false }
+        let email = preparationContext?.expected.login ?? OttaiRegistry.loadAccountLogin()
         guard !email.isEmpty, let password = Keychain.loadPassword() else { return false }
         return login(email: email, password: password) != nil
     }
@@ -223,6 +337,7 @@ enum OttaiSyaiClient {
 
     /// POST security/exchangeKey: P-256 ECDH, then HKDF-SHA256 gives the GCM and HMAC keys.
     private static func openChannel() -> Channel? {
+        guard preparationIsAuthorized() else { return nil }
         if let c = channel, c.deviceId == deviceId, c.expireTime > nowMs() { return c }
         let id = deviceId
         let priv = P256.KeyAgreement.PrivateKey()
@@ -240,6 +355,7 @@ enum OttaiSyaiClient {
         req.setValue("application/json", forHTTPHeaderField: "content-type")
         baseHeaders(&req, productModel: false)
         let (data, status, error) = http(req)
+        guard preparationIsAuthorized() else { return nil }
         if let error = error { return fail("network: \(error.localizedDescription)") }
         guard (200 ... 299).contains(status),
               let root = data.flatMap({ try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }) else {
@@ -278,6 +394,7 @@ enum OttaiSyaiClient {
     /// Seals the body: GET puts cipherParam* in the query, POST/PUT cipherBody* in the body.
     private static func send(_ method: String, path: String, body: [String: Any], headers: [String: String],
                              productModel: Bool, authed: Bool, absolute: Bool) -> Reply {
+        guard preparationIsAuthorized() else { return Reply(status: -1, json: nil, error: "Syai preparation account or sensor changed") }
         guard let c = openChannel() else { return Reply(status: -1, json: nil, error: OttaiCloudClient.lastError) }
         guard let plain = try? JSONSerialization.data(withJSONObject: body),
               let sealed = try? AES.GCM.seal(plain, using: c.gcmKey, nonce: AES.GCM.Nonce(), authenticating: c.aad) else {
@@ -311,7 +428,7 @@ enum OttaiSyaiClient {
         req.setValue(String(timeNow), forHTTPHeaderField: "cipherTimeNow")
         req.setValue(c.deviceId, forHTTPHeaderField: "cipherUserId")
         baseHeaders(&req, productModel: productModel)
-        let token = OttaiRegistry.loadAccessToken()
+        let token = sessionAccessToken
         if authed, !token.isEmpty {
             req.setValue(token, forHTTPHeaderField: "Authorization")
             req.setValue(userId, forHTTPHeaderField: "customerId")
@@ -319,6 +436,7 @@ enum OttaiSyaiClient {
         for (k, v) in headers { req.setValue(v, forHTTPHeaderField: k) }
 
         let (data, status, error) = http(req)
+        guard preparationIsAuthorized() else { return Reply(status: -1, json: nil, error: "Syai preparation account or sensor changed") }
         if let error = error { return Reply(status: status, json: nil, error: "network: \(error.localizedDescription)") }
         guard let data = data, let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             return Reply(status: status, json: nil, error: nil)
@@ -379,6 +497,7 @@ enum OttaiSyaiClient {
     }
 
     private static func http(_ req: URLRequest) -> (Data?, Int, Error?) {
+        guard preparationIsAuthorized() else { return (nil, -1, URLError(.cancelled)) }
         var req = req
         req.timeoutInterval = timeout
         let sem = DispatchSemaphore(value: 0)

@@ -196,3 +196,280 @@ final class OttaiGlobalLoginTests: XCTestCase {
         XCTAssertThrowsError(try result.get())
     }
 }
+
+// Synthetic encrypted cloud fixtures exercise the actual preparation API; no HTTP/BLE is used.
+extension OttaiGlobalLoginTests {
+    private var preparationMAC: String { "AABBCCDDEEFF" }
+    private var preparationFirmware: String { "E1.2.6(V1.7.SH2616.1),STDRD" }
+    private var preparationRoot: String { "0123456789ABCDEF" }
+
+    private func withPreparationAccount(base: String = OttaiConstants.apiBaseGlobal,
+                                        _ work: (OttaiAccountContext) throws -> Void) rethrows {
+        let defaults = UserDefaults.standard
+        let previous = defaults.dictionaryRepresentation().filter { $0.key.hasPrefix("ottai_") }
+        let previousFailure = OttaiCloudClient.lastFailure
+        defer {
+            for key in defaults.dictionaryRepresentation().keys where key.hasPrefix("ottai_") { defaults.removeObject(forKey: key) }
+            for (key, value) in previous { defaults.set(value, forKey: key) }
+            OttaiCloudClient.lastFailure = previousFailure
+        }
+        for key in previous.keys { defaults.removeObject(forKey: key) }
+        defaults.set(base, forKey: "ottai_api_base")
+        defaults.set(base == OttaiConstants.apiBase ? "CN_PHONE" : "GLOBAL_PHONE", forKey: "ottai_session_profile")
+        defaults.set("fixture-native-token", forKey: "ottai_access_token")
+        defaults.set("42", forKey: "ottai_user_id")
+        defaults.set(preparationRoot, forKey: "ottai_glucose_secret_key")
+        defaults.set(UUID().uuidString, forKey: "ottai_session_generation")
+        defaults.set(owner, forKey: "ottai_global_common_device_id")
+        defaults.set("fixture-cn-installation", forKey: "ottai_cn_common_device_id")
+        OttaiCloudClient.lastFailure = nil
+        try work(OttaiRegistry.accountContext())
+    }
+
+    func testSyaiRefreshCannotOverwriteAReplacementSession() {
+        withPreparationAccount(base: OttaiConstants.apiBaseSyai) { account in
+            XCTAssertTrue(OttaiRegistry.commitRefreshedSyaiSession(account, accessToken: "fixture-refreshed",
+                refreshToken: "fixture-refresh", glucoseSecretKey: nil))
+            XCTAssertEqual(OttaiRegistry.loadAccessToken(), "fixture-refreshed")
+            UserDefaults.standard.set(UUID().uuidString, forKey: "ottai_session_generation")
+            XCTAssertFalse(OttaiRegistry.commitRefreshedSyaiSession(account, accessToken: "fixture-stale",
+                refreshToken: "fixture-stale-refresh", glucoseSecretKey: "fixture-stale-secret"))
+            XCTAssertEqual(OttaiRegistry.loadAccessToken(), "fixture-refreshed")
+            XCTAssertEqual(OttaiRegistry.loadRefreshToken(), "fixture-refresh")
+            XCTAssertEqual(OttaiRegistry.loadGlucoseSecretKey(), preparationRoot)
+        }
+    }
+
+    func testSyaiPreparationRejectsStaleOwnerBeforeRunningAnyOperation() {
+        withPreparationAccount(base: OttaiConstants.apiBaseSyai) { account in
+            var calls = 0
+            let rejected: Bool? = OttaiSyaiClient.withPreparationContext(account, stillAuthorized: { false }) {
+                calls += 1
+                return true
+            }
+            XCTAssertNil(rejected)
+            XCTAssertEqual(calls, 0)
+            XCTAssertEqual(OttaiRegistry.loadAccessToken(), "fixture-native-token")
+        }
+    }
+
+    private func preparationResponse(mac: String? = nil, firmware: String? = nil, invalidKeys: Bool = false) throws -> Reply {
+        let mac = mac ?? preparationMAC
+        let fieldTime: Int64 = 1_760_000_000_000
+        let key = OttaiCrypto.deriveFieldKey(glucoseSecretKey: preparationRoot, fieldTimestamp: fieldTime, mac: mac)
+        func encrypted(_ plain: String) throws -> String { try XCTUnwrap(OttaiCrypto.encryptCloudField(plaintext: plain, fieldKey: key)) }
+        return .init(body: ["code": "OK", "data": ["cgmDeviceRespVO": [
+            "mac": mac, "deviceVersion": firmware ?? preparationFirmware,
+            "keyA": try encrypted(invalidKeys ? "invalid" : String(repeating: "01", count: 96)),
+            "produceTime": fieldTime, "activeTime": fieldTime, "activeExpireTime": Int64(14 * 86_400_000),
+            "id": 123], "cgmDeviceMethodVO": ["method": try encrypted("C0"), "coefficient": try encrypted("1"),
+                "methodUpdateTime": fieldTime, "coeffUpdateTime": fieldTime]]], failure: nil)
+    }
+
+    func testFreshPreparationBindsFullLiveRevisionWithSecondsAndKeepsSyntheticStartZero() throws {
+        for base in [OttaiConstants.apiBaseGlobal, OttaiConstants.apiBase] {
+            try withPreparationAccount(base: base) { context in
+                let response = try preparationResponse()
+                var calls: [OttaiGlobalContract.Request] = []
+                let result = OttaiCloudClient.prepareActivationMaterials(mac: preparationMAC, liveFirmware: preparationFirmware,
+                    requestedContext: context, bindAlreadyAttempted: false, send: { request in
+                        calls.append(request)
+                        return calls.count == 1 ? .init(body: ["code": "OK", "data": NSNull()], failure: nil) : response
+                    })
+                XCTAssertEqual(calls.map(\.method), ["GET", "POST"])
+                let bind = try XCTUnwrap(calls.last)
+                XCTAssertEqual(bind.url, base + OttaiConstants.epBindV3)
+                XCTAssertEqual(bind.body?["deviceVersion"] as? String, preparationFirmware)
+                XCTAssertEqual(bind.body?["newBindType"] as? Int, 2)
+                XCTAssertEqual(bind.body?["userId"] as? String, "42")
+                XCTAssertEqual(bind.body?["deviceType"] as? String, "cgm")
+                let seconds = try XCTUnwrap(bind.body?["activeTime"] as? Int64)
+                XCTAssertLessThan(abs(seconds - Int64(Date().timeIntervalSince1970)), 5)
+                XCTAssertEqual(bind.headers["Authorization"], "fixture-native-token")
+                XCTAssertEqual(bind.headers["appName"], base == OttaiConstants.apiBase ? "ottai" : "ottai-seas")
+                XCTAssertEqual(result?.activeTimeMs, 0)
+                XCTAssertEqual(result?.coefficient, "1")
+                XCTAssertNotNil(result?.authKeys)
+                XCTAssertEqual(OttaiRegistry.loadMaterials(sensorId: preparationMAC).keyAHex, "", "The serial runtime owns material persistence")
+            }
+        }
+    }
+
+    func testPreparationLostBindReplyReconcilesWithOneReadAndNoRepeatedPost() throws {
+        try withPreparationAccount { context in
+            let response = try preparationResponse(firmware: "E1.2.6(V1.7.SH2616.1)")
+            var methods: [String] = []
+            let result = OttaiCloudClient.prepareActivationMaterials(mac: preparationMAC, liveFirmware: preparationFirmware,
+                requestedContext: context, bindAlreadyAttempted: false, send: { request in
+                    methods.append(request.method)
+                    switch methods.count {
+                    case 1: return .init(body: ["data": NSNull()], failure: nil)
+                    case 2: return .init(body: nil, failure: .init(text: "synthetic lost response"))
+                    default: return response
+                    }
+                })
+            XCTAssertEqual(methods, ["GET", "POST", "GET"])
+            XCTAssertEqual(result?.activeTimeMs, 0)
+        }
+    }
+
+    func testPreparationRecoveryNeverRepeatsAnUncertainBind() throws {
+        try withPreparationAccount { context in
+            for bound in [false, true] {
+                var methods: [String] = []
+                let response: Reply = bound ? try preparationResponse() : .init(body: ["data": NSNull()], failure: nil)
+                let result = OttaiCloudClient.prepareActivationMaterials(mac: preparationMAC, liveFirmware: preparationFirmware,
+                    requestedContext: context, bindAlreadyAttempted: true, send: { request in methods.append(request.method); return response })
+                XCTAssertEqual(methods, ["GET"])
+                XCTAssertEqual(result != nil, bound)
+            }
+        }
+    }
+
+    func testPreparationRejectsAnotherSensorWrongBuildWrongVariantAndUndecryptableKeys() throws {
+        try withPreparationAccount { context in
+            for response in [try preparationResponse(mac: "112233445566"),
+                             try preparationResponse(firmware: "E1.2.7(V1.7.SH2616.1),STDRD"),
+                             try preparationResponse(firmware: "E1.2.6(V1.7.SH2616.1),OTHER"),
+                             try preparationResponse(invalidKeys: true),
+                             Reply(body: ["code": "OK"], failure: nil),
+                             Reply(body: ["data": ["cgmDeviceRespVO": ["deviceId": 123]]], failure: nil),
+                             Reply(body: ["data": ["unexpected": "nonempty"]], failure: nil)] {
+                var methods: [String] = []
+                XCTAssertNil(OttaiCloudClient.prepareActivationMaterials(mac: preparationMAC, liveFirmware: preparationFirmware,
+                    requestedContext: context, bindAlreadyAttempted: false, send: { request in methods.append(request.method); return response }))
+                XCTAssertEqual(methods, ["GET"])
+            }
+        }
+    }
+
+    func testPreparationAccountChangeOrCancellationAfterGetPreventsBind() {
+        for changeAccount in [false, true] {
+            withPreparationAccount { context in
+                var authorized = true, calls = 0
+                let result = OttaiCloudClient.prepareActivationMaterials(mac: preparationMAC, liveFirmware: preparationFirmware,
+                    requestedContext: context, bindAlreadyAttempted: false, send: { _ in
+                        calls += 1
+                        if changeAccount { UserDefaults.standard.set(UUID().uuidString, forKey: "ottai_session_generation") }
+                        else { authorized = false }
+                        return .init(body: ["data": NSNull()], failure: nil)
+                    }, stillAuthorized: { authorized })
+                XCTAssertNil(result)
+                XCTAssertEqual(calls, 1)
+            }
+        }
+    }
+
+    func testPreparationExpiredSessionAndMissingDecryptKeyStopWithoutFollowup() {
+        withPreparationAccount { context in
+            var calls = 0
+            XCTAssertNil(OttaiCloudClient.prepareActivationMaterials(mac: preparationMAC, liveFirmware: preparationFirmware,
+                requestedContext: context, bindAlreadyAttempted: false, send: { _ in
+                    calls += 1
+                    return calls == 1 ? .init(body: ["data": NSNull()], failure: nil)
+                        : .init(body: nil, failure: .init(text: "expired", code: "AuthFailed_TokenInvalid", httpStatus: 401))
+                }))
+            XCTAssertEqual(calls, 2)
+            UserDefaults.standard.removeObject(forKey: "ottai_glucose_secret_key")
+            XCTAssertNil(OttaiCloudClient.prepareActivationMaterials(mac: preparationMAC, liveFirmware: preparationFirmware,
+                requestedContext: context, bindAlreadyAttempted: false, send: { _ in
+                    XCTFail("Missing local decryption key must not bind"); return .init(body: nil, failure: nil)
+                }))
+        }
+    }
+
+    func testExplicitBootstrapCheckUsesOneReadOnlyV3ValidationAndPreservesNativeIdentity() {
+        withPreparationAccount { context in
+            var calls: [OttaiGlobalContract.Request] = []
+            XCTAssertTrue(OttaiCloudClient.checkActivationBootstrap(mac: preparationMAC, requestedContext: context, send: { request in
+                calls.append(request)
+                return .init(body: ["data": ["mac": self.preparationMAC, "deviceVersion": self.preparationFirmware]], failure: nil)
+            }))
+            XCTAssertEqual(calls.map(\.url), [OttaiConstants.apiBaseGlobal + OttaiConstants.epValidateByMacV3])
+            XCTAssertEqual(calls.first?.headers["deviceId"], owner)
+            XCTAssertEqual(calls.first?.headers["appName"], "ottai-seas")
+            XCTAssertTrue(OttaiRegistry.isV3CredentialBootstrapPending(preparationMAC))
+            XCTAssertEqual(OttaiRegistry.loadLastValidatedDeviceVersion(sensorId: preparationMAC), preparationFirmware)
+            XCTAssertEqual(OttaiRegistry.loadMaterials(sensorId: preparationMAC).keyAHex, "")
+        }
+    }
+
+    func testFreshFirmwareMatchingKeepsBuildAndNamedVariantsDistinct() {
+        XCTAssertEqual(OttaiGlobalContract.preparationBindVersion(preparationFirmware + "\0stale"), preparationFirmware)
+        XCTAssertTrue(OttaiGlobalContract.preparationVersionMatches(sensor: preparationFirmware, cloud: "E1.2.6(V1.7.SH2616.1)"))
+        XCTAssertTrue(OttaiGlobalContract.preparationVersionMatches(sensor: preparationFirmware, cloud: "V1.7.SH2616.1"))
+        for other in ["E1.2.7(V1.7.SH2616.1)", "E1.2.6(V1.7.SH2616.2)", "E1.2.6(V1.7.SH2616.1),OTHER", "V1.8", "garbage"] {
+            XCTAssertFalse(OttaiGlobalContract.preparationVersionMatches(sensor: preparationFirmware, cloud: other))
+        }
+    }
+}
+
+extension OttaiGlobalLoginTests {
+    func testPreparationRequestsKeepOneCapturedWireIdentityAcrossTokenRefresh() throws {
+        try withPreparationAccount { context in
+            let response = try preparationResponse()
+            var calls: [OttaiGlobalContract.Request] = []
+            let result = OttaiCloudClient.prepareActivationMaterials(mac: preparationMAC, liveFirmware: preparationFirmware,
+                requestedContext: context, bindAlreadyAttempted: false, send: { request in
+                    calls.append(request)
+                    if calls.count == 1 {
+                        OttaiRegistry.saveAccessToken("replacement-token")
+                        return .init(body: ["data": NSNull()], failure: nil)
+                    }
+                    return response
+                })
+            XCTAssertNotNil(result)
+            XCTAssertEqual(calls.count, 2)
+            XCTAssertTrue(calls.allSatisfy { $0.headers["Authorization"] == "fixture-native-token" })
+            XCTAssertTrue(calls.allSatisfy { $0.headers["deviceId"] == self.owner })
+        }
+    }
+}
+
+extension OttaiGlobalLoginTests {
+    func testPreparationRecordsBindIntentOnlyAtTheActualPostAndStopsOnSaveFailure() {
+        for getFails in [false, true] {
+            withPreparationAccount { context in
+                var calls = 0, marks = 0
+                XCTAssertNil(OttaiCloudClient.prepareActivationMaterials(mac: preparationMAC, liveFirmware: preparationFirmware,
+                    requestedContext: context, bindAlreadyAttempted: false, send: { _ in
+                        calls += 1
+                        return getFails ? .init(body: nil, failure: .init(text: "synthetic GET failure"))
+                            : .init(body: ["data": NSNull()], failure: nil)
+                    }, willBind: { marks += 1; return false }))
+                XCTAssertEqual(calls, 1)
+                XCTAssertEqual(marks, getFails ? 0 : 1)
+            }
+        }
+    }
+}
+
+extension OttaiGlobalLoginTests {
+    func testFreshRevisionParserRequiresCompletePrintableVendorGrammar() {
+        for value in ["E1.2.6(V1.7.SH2616.1),STDRD", "vE1.2.3(V1.7.SH2542.1)", "V1.7.0", "v1.7.SH2616.1", "1.7.0"] {
+            XCTAssertEqual(OttaiGlobalContract.preparationBindVersion(value), value)
+        }
+        XCTAssertTrue(OttaiGlobalContract.preparationVersionMatches(sensor: preparationFirmware, cloud: "V1.7"))
+        XCTAssertTrue(OttaiGlobalContract.preparationVersionMatches(sensor: "V01.007.0", cloud: "v1.7"))
+        for malformed in ["junk E1.2.6(V1.7.SH2616.1),STDRD", "junk(V1.7.0)", "V1.7.0 V1.8.0",
+                          "E1.2.6(V1.7.0)(V1.8.0)", "V1.7.0\n", "\nV1.7.0", "V1.7.0\t", "V1.7.é",
+                          "E1.2.6(V1.7.SH2616.1),STDRD,V1.8", String(repeating: "x", count: 513), ""] {
+            XCTAssertNil(OttaiGlobalContract.preparationBindVersion(malformed))
+            XCTAssertFalse(OttaiGlobalContract.preparationVersionMatches(sensor: malformed, cloud: malformed))
+        }
+    }
+
+    func testUnfinishedPreparationBlocksCloudFetchWithoutAdoptingBindTimestamp() {
+        withPreparationAccount { context in
+            let checkpoint = OttaiPreparationCheckpoint(sensorID: preparationMAC, bluetoothID: UUID().uuidString,
+                apiBase: context.apiBase, userID: context.userId, authorizedAtMs: timestamp,
+                liveFirmware: preparationFirmware, bindAttempted: true, materialsSaved: true, factoryComplete: true)
+            XCTAssertTrue(OttaiRegistry.savePreparationCheckpoint(checkpoint))
+            if case .failed = OttaiCloudClient.fetchAndSaveMaterials(cloudId: preparationMAC, requestedContext: context) {} else {
+                XCTFail("An unfinished physical activation must not consume a synthetic cloud bind timestamp")
+            }
+            XCTAssertEqual(OttaiRegistry.loadMaterials(sensorId: preparationMAC).activeTimeMs, 0)
+            XCTAssertNotNil(OttaiRegistry.loadPreparationCheckpoint(preparationMAC))
+        }
+    }
+}

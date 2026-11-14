@@ -23,6 +23,9 @@ XDRIP_CODE_SIGN_STYLE = Automatic
 XDRIP_DEVELOPMENT_TEAM = RNX44PP998
 
 // Version [DEFAULT]
+// Requires an NFC-capable provisioning profile; local overrides may disable it.
+OTTAI_NFC_WAKE_ENABLED = YES
+
 #include? "Version.xcconfig"
 
 // Optional overrides

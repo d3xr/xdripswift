@@ -18,8 +18,6 @@ enum OttaiConstants {
 
     static let tag = "Ottai"
     static let defaultDisplayName = "Ottai CGM"
-    static let provisionalSensorPrefix = "OTTAI-"
-    static let maxNativeSensorIdChars = 16
 
     // MARK: - Bluetooth services and characteristics (UUID text)
 
@@ -40,11 +38,7 @@ enum OttaiConstants {
     static let charAuthAppParam = "1756ef6e-884b-4eb0-b646-f04ab18408f9"
     static let charAuthSign = "785022c6-08c0-48af-ad17-684bb889aa83"
 
-    /// Used only during activation.
-    static let serviceDestructive = "84c5b711-655a-460d-89ca-337dbc981857"
     static let charDestructive = "6aa799b6-b374-4148-8f36-6d440c0ec203"
-
-    static let cccd = "00002902-0000-1000-8000-00805f9b34fb"
 
     /// The "activate" command byte. It is padded with zeros and encrypted before it is sent.
     static let activateCmd: UInt8 = 0x03
@@ -64,7 +58,6 @@ enum OttaiConstants {
     static let epSmsLogin = "\(prefix)/user/smsLogin"
     static let epAccountLogin = "\(prefix)/user/accountLogin"
     static let epLogout = "\(prefix)/user/logout"
-    static let epGetUser = "\(prefix)/user/getUser"
     static let epValidateByMac = "\(prefix)/device/validateDeviceByMacV2"
     static let epValidateByMacV3 = "\(prefix)/device/validateDeviceByMacV3"
     static let epBind = "\(prefix)/deviceBind/composite/bind"
@@ -73,11 +66,7 @@ enum OttaiConstants {
     static let epUnbind = "\(prefix)/deviceBind/unBindDevice"
     static let epGetBindDevice = "\(prefix)/deviceBind/getBindDevice"
     static let epDeviceList = "\(prefix)/deviceBind/list"
-    static let epDownloadGlucose = "\(prefix)/search/downloadGlucose"
 
-    static let headerAppName = "ottai"
-    static let headerPackage = "com.ottai.tag"
-    static let headerAppType = "ottai_main"
     /// A fake China IP. The China server only answers requests that look like they come from China.
     static let cnForwardIp = "114.114.114.114"
 
@@ -91,11 +80,6 @@ enum OttaiConstants {
     private static func fullMatch(_ regex: NSRegularExpression, _ s: String) -> Bool {
         let range = NSRange(s.startIndex..., in: s)
         return regex.firstMatch(in: s, options: [], range: range) != nil
-    }
-
-    static func isProvisionalSensorId(_ name: String?) -> Bool {
-        guard let name = name?.trimmingCharacters(in: .whitespaces) else { return false }
-        return name.lowercased().hasPrefix(provisionalSensorPrefix.lowercased())
     }
 
     /// The cloud id in its standard form: 12 upper-case hex characters, no colons.
@@ -128,10 +112,6 @@ enum OttaiConstants {
             return macWithColons(t.uppercased())
         }
         return nil
-    }
-
-    static func looksLikeBleAddress(_ address: String?) -> Bool {
-        normalizeBleAddress(address, allowPlain: true) != nil
     }
 
     static func looksLikeMac(_ s: String?) -> Bool {
@@ -209,13 +189,12 @@ enum OttaiConstants {
             ? sanitizeActiveExpireMs(cloudActiveExpireMs)
             : defaultActiveExpireMs
         var candidates: [Int64] = []
-        if cloudMs > extendedLifetimeMs { candidates.append(cloudMs) }
         var days = extendedLifetimeDays
         while days >= 15 {
             candidates.append(days * 24 * 3600 * 1000)
             days -= 1
         }
-        candidates.append(cloudMs)
+        candidates.append(min(cloudMs, extendedLifetimeMs))
         // remove doubles, keep the order
         var seen = Set<Int64>()
         return candidates.filter { seen.insert($0).inserted }
@@ -227,7 +206,6 @@ enum OttaiConstants {
         return defaultActiveExpireMs
     }
 
-
     /// The sensor's command byte is the truth. 0, 1 or 2 means "not activated yet".
     static func commandNeedsActivation(_ commandStatus: Int) -> Bool {
         commandStatus >= 0 && commandStatus <= 2
@@ -236,11 +214,6 @@ enum OttaiConstants {
     /// Activation cannot be undone, so the user must ask for it.
     static func shouldStartActivation(commandStatus: Int, explicitlyRequested: Bool) -> Bool {
         explicitlyRequested && commandNeedsActivation(commandStatus)
-    }
-
-    /// China Ottai and Syai sensors must be woken with NFC around activation.
-    static func requiresNfcActivationWake(apiBase: String) -> Bool {
-        apiBase == OttaiConstants.apiBase || apiBase == apiBaseSyai
     }
 
     // MARK: - Warmup
@@ -260,6 +233,4 @@ enum OttaiConstants {
         return activationStartMs > 0 && sampleMs > 0 && sampleMs - activationStartMs < period
     }
 
-    /// After the lifetime is over, wait this long without samples before calling the sensor expired.
-    static let expiredStaleGraceMs: Int64 = 6 * 3600 * 1000
 }
