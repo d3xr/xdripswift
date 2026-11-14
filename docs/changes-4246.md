@@ -1,6 +1,6 @@
 # Файлы реализации 4246
 
-Current release: **7.2.1 / 4247**. [Upstream sync and branch audit](upstream-sync-7.2.1.md). The 4246 details below remain the historical implementation reference.
+Current release: **7.2.1 / 4250**. [Ottai/Syai integration and PR](upstream/PLAN.md#обновление-ottai--14112026). [Upstream sync and branch audit](upstream-sync-7.2.1.md). The 4246 details below remain the historical implementation reference.
 
 Историческая инвентаризация последнего этапа реализации 4246 относительно предыдущей внутренней сборки: 56 операций, затрагивающих 57 путей (переименование считается одной операцией), из них 34 текстовые операции и 22 PNG. Это не полный diff публичной `custom-build` от upstream: ранние интеграции входят в единый публичный снимок. Приватная история Git не переносилась; [состав снимка](public-snapshot.md).
 

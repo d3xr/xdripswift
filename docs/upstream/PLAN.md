@@ -34,3 +34,9 @@
 - [Ottai Global M8 follow-up #1](https://github.com/luborjurena/xdripswift/pull/1): draft в ветку автора исходного PR #736, база feat/ottai-syai/d0e212a. Это дополнение к его существующему драйверу, которое автор может включить в #736. 22 файла, 128 тестов без ошибок и пропусков; отдельно собраны приложение и расширения для Simulator.
 
 Ottai PR включает native Global login, выбор сенсора, защищённый транспорт, сохранение BLE-материалов, активацию/bind с восстановлением и прогрев. Это не auth-only патч. В нём нет AiDex, Sibionics, моделей базы, Vendor, личной подписи или оформления. Путь нового сенсора проверен синтетически; аппаратная активация остаётся причиной draft. Работа текущего активированного M8 проверялась в личной интеграции с этим кодом. Небольшие дополнительные защиты атомарного контекста и удалённой карточки находятся в scoped PR-ветке.
+
+## Обновление Ottai — 14.11.2026
+
+Основная `custom-build` объединяет актуальный Ottai/Syai `117ba32` и параллельно опубликованный GS1 `af19c779`; версия 7.2.1/4250. Наши account/identity guards, native Global login, подготовка, read-back срока и NFC сохранены. Добавлены исправления parsing/notification recovery, timestamps, auth retry, persistent Syai upload и актуальный Syai V3 factory flow с legacy fallback.
+
+Существующий [Ottai PR #1](https://github.com/luborjurena/xdripswift/pull/1) обновлён поверх `117ba32`, head `da8cf885`, без force push и без посторонних драйверов/моделей/оформления. Ветка PR: 277 XCTest без ошибок и пропусков, включая 233 Ottai. Основная сборка: 690 выбранных XCTest, 688 passed, 1 private replay skip, 1 прежнее Libre3 diagnostic failure, совпадающее с чистым upstream. Это не полный upstream suite. [Актуальное описание PR](ottai-global-m8-pr.md).
