@@ -33,7 +33,7 @@
 Проверенная среда — Mac Apple Silicon, **Xcode 27.0 / SDK 27.0**, Python3. Готовый GS1 XCFramework содержит ARM64 для iPhone и Simulator; x86_64 Simulator не поставляется. Обычная сборка не требует Kotlin, JVM, CocoaPods или загрузки отдельного native core.
 
 ```sh
-git clone --branch custom-build https://github.com/d3xr/xdripswift.git xdrip-plus
+git clone --branch custom-build https://github.com/d3xr/xdrip-plus.git xdrip-plus
 cd xdrip-plus
 cp xDripConfigOverride.xcconfig.example xDripConfigOverride.xcconfig
 ```

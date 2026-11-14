@@ -17,12 +17,12 @@ Runtime, тесты, схемы миграции Core Data, assets и поста
 ## Сборка
 
 ```sh
-git clone --branch custom-build https://github.com/d3xr/xdripswift.git xdrip-plus
+git clone --branch custom-build https://github.com/d3xr/xdrip-plus.git xdrip-plus
 cd xdrip-plus
 cp xDripConfigOverride.xcconfig.example xDripConfigOverride.xcconfig
 ```
 
-Указать собственную Team, настроить capabilities и выполнить команды из [технической передачи](developer-handoff-4246.md#5-сборка-с-собственными-ключами). Публичный репозиторий планируется переименовать из `xdripswift` в `xdrip-plus`; до завершения переименования используется текущий URL. Для clone нужен именно `--branch custom-build`: `master/develop` сохраняют прежнее содержимое.
+Указать собственную Team, настроить capabilities и выполнить команды из [технической передачи](developer-handoff-4246.md#5-сборка-с-собственными-ключами). Канонический публичный репозиторий — `d3xr/xdrip-plus`. Прежний URL `d3xr/xdripswift` перенаправляет на него. Ветка `custom-build` выбрана основной. Для clone нужен именно `--branch custom-build`: `master/develop` сохраняют прежнее содержимое.
 
 ## Границы проверки
 

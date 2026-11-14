@@ -110,7 +110,7 @@ NFC wake — отдельное RF-действие. `OttaiNFCWake` исполь
 Публичная интеграционная ветка — `custom-build`. Для клонирования ключи подписи не нужны; собственная Apple Team требуется для device build.
 
 ```sh
-git clone --branch custom-build https://github.com/d3xr/xdripswift.git xdrip-plus
+git clone --branch custom-build https://github.com/d3xr/xdrip-plus.git xdrip-plus
 cd xdrip-plus
 cp xDripConfigOverride.xcconfig.example xDripConfigOverride.xcconfig
 ```
