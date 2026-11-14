@@ -1071,7 +1071,7 @@ private extension BluetoothPeripheralDetailState {
                 return
             }
             pendingAlert = BluetoothPeripheralDetailAlert(title: "Connect factory 14-day GS1 CN",
-                message: "Confirm that this is the Chinese factory 14-day GS1. The first connection may start an unused sensor. Warm-up is 60 minutes from the original start. EU, GS1-7, GS1-10, SIB2 and V120 are not supported by this integration. No reset or extension command is sent.",
+                message: "Confirm that this is the Chinese factory 14-day GS1. The first connection may start an unused sensor. Warm-up is 60 minutes from the original start. EU, GS1-7, GS1-10, SIB2 and V120 are not supported by this integration. The original sensor start is preserved.",
                 primaryButtonTitle: "Connect", primaryAction: { [weak self, weak device] in
                     guard let self, let device else { return }
                     device.startAuthorized = true
@@ -4862,25 +4862,12 @@ private extension BluetoothPeripheralDetailState {
         }
         if let device, let identity = gs1CheckpointIdentity(for: device) {
             let enabled = GS1ExtendedReadingConsent.isEnabled(identity)
-            rows.append(row(id: "gs1-extended", title: "Read after 14 days (experimental)",
-                detail: enabled ? "On — device details only" : "Off", action: { [weak self, weak device] in
+            rows.append(row(id: "gs1-extended", title: "Extend sensor session (testing)",
+                detail: enabled ? "On — main graph, alerts and Trio" : "Off", action: { [weak self, weak device] in
                     guard let self, let device else { return }
                     self.requestGS1ExtendedReading(for: device)
                 }))
-            if enabled {
-                let reading = transmitter?.extendedReadingForDisplay
-                let detail: String
-                if let reading {
-                    let value = UserDefaults.standard.bloodGlucoseUnitIsMgDl ? reading.reading.mgdl : reading.reading.mgdl / 18
-                    let unit = UserDefaults.standard.bloodGlucoseUnitIsMgDl ? "mg/dL" : "mmol/L"
-                    let age = reading.reading.date.timeIntervalSince(reading.start) / 86400
-                    detail = String(format: "%.1f %@ · %@ · original age %.2f days", value, unit,
-                        reading.reading.date.toStringInUserLocale(timeStyle: .short, dateStyle: .medium), age)
-                } else { detail = "No fresh extended reading" }
-                rows.append(row(id: "gs1-extended-value", title: "Experimental reading", detail: detail, detailLineLimit: 5))
-                rows.append(row(id: "gs1-extended-limit", title: "Quality after labelled wear time is not verified",
-                    detail: "These values are excluded from Trio, the main graph, alerts and exports. The original start, 60-minute warm-up, calibrations and 14-day expiry remain unchanged. This exposes diagnostic final corrections for CN AA55/V115G before 23 days 19 h 41 min from the original start; existing history reception continues unchanged. It does not restart the sensor.", detailLineLimit: 10))
-            }
+
         }
         if device == nil, gs1Selected != nil {
             rows.append(row(id: "gs1-save", title: "Use selected device", detail: "Save the code, MAC and selected iPhone Bluetooth identity", isEnabled: !isScanning, action: { [weak self] in self?.saveGS1Selection() }))
@@ -4904,9 +4891,9 @@ private extension BluetoothPeripheralDetailState {
             self.refresh()
         }
         if GS1ExtendedReadingConsent.isEnabled(identity) { apply(false); return }
-        pendingAlert = BluetoothPeripheralDetailAlert(title: "Read beyond the 14-day app limit?",
-            message: "Only for the configured Chinese GS1 AA55/V115G. This does not reset or physically extend the sensor. Accuracy beyond 14 days has not been verified. Fresh final readings will appear only in this device card, never in Trio, the main graph, alerts or exports. The original session and 14-day expiry stay unchanged. Diagnostic display ends at 23 days 19 h 41 min from the original start or when protocol, time or quality checks fail. Existing history reception continues unchanged.",
-            primaryButtonTitle: "Enable experimental reading", primaryAction: { apply(true) }, secondaryButtonTitle: Texts_Common.Cancel)
+        pendingAlert = BluetoothPeripheralDetailAlert(title: "Enable sensor extension?",
+            message: "Extension is in testing. Fresh calculated readings after 14 days will be used in the main graph, alerts and Trio. The original start and history are preserved. Turning this off stops new extended readings; saved history stays.",
+            primaryButtonTitle: "Enable extension", primaryAction: { apply(true) }, secondaryButtonTitle: Texts_Common.Cancel)
     }
 
     func editGS1Value(isCode: Bool) {

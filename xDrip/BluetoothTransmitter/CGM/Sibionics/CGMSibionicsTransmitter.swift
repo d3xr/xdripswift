@@ -62,7 +62,6 @@ final class CGMSibionicsTransmitter: BluetoothTransmitter, CGMTransmitter {
     private let selectedUUID: UUID?
     private let authorized: Bool
     private let delivery = CGMDeliveryGate()
-    private let extendedReadingStore = GS1ExtendedReadingStore()
     private var session: GS1Session?
     private weak var activePeripheral: CBPeripheral?
     private var assembler = GS1PacketAssembler(layout: .fixed10)
@@ -83,21 +82,17 @@ final class CGMSibionicsTransmitter: BluetoothTransmitter, CGMTransmitter {
     private var statusValue = "Waiting for connection"
     var statusText: String { statusLock.lock(); defer { statusLock.unlock() }; return statusValue }
     var readOnlyDetectedMAC: GS1MAC? { statusLock.lock(); defer { statusLock.unlock() }; return detectedMAC }
-    var extendedReadingForDisplay: GS1ExtendedReadingStore.Value? {
-        guard let token = delivery.token(), let value = extendedReadingStore.current(), delivery.allows(token) else { return nil }
-        return value
-    }
-    func updateExtendedReading(_ reading: GS1Session.Reading?, start: Date?, authorization: GS1ExtendedReadingConsent.Token?) {
-        guard let reading, let start, let authorization, GS1ExtendedReadingConsent.allows(authorization) else {
-            extendedReadingStore.update(nil)
-            return
-        }
-        extendedReadingStore.update(.init(reading: reading, start: start, authorization: authorization))
-    }
     func setExtendedReadingEnabled(_ enabled: Bool) {
         guard let configuredIdentity, let selectedUUID else { return }
         GS1ExtendedReadingConsent.setEnabled(enabled, identity: configuredIdentity.checkpointIdentity(peripheralID: selectedUUID))
-        extendedReadingStore.update(nil)
+        runOnCentralQueue { [weak self] in
+            guard let self, let session = self.session, session.startConfirmed,
+                  let start = session.start, !self.delivery.isReleased else { return }
+            DispatchQueue.main.async { [weak self] in
+                guard let self, !self.delivery.isReleased else { return }
+                self.cgmDelegate?.sensorSessionConfigurationChanged(startDate: start, from: self)
+            }
+        }
     }
     private var canOperate: Bool { authorized && configuredIdentity != nil && selectedUUID != nil && delivery.token() != nil }
 
@@ -118,7 +113,11 @@ final class CGMSibionicsTransmitter: BluetoothTransmitter, CGMTransmitter {
     func sensorWarmupDurationInMinutes() -> Double? { GS1Policy.warmup / 60 }
     func getCBUUID_Service() -> String { GS1ChineseProtocol.serviceUUID }
     func getCBUUID_Receive() -> String { GS1ChineseProtocol.notifyUUID }
-    func maxSensorAgeInDays() -> Double? { 14 }
+    func maxSensorAgeInDays() -> Double? {
+        guard let configuredIdentity, let selectedUUID else { return GS1Policy.lifetime / 86400 }
+        let key = configuredIdentity.checkpointIdentity(peripheralID: selectedUUID)
+        return (GS1ExtendedReadingConsent.isEnabled(key) ? GS1Policy.extendedLifetime : GS1Policy.lifetime) / 86400
+    }
     // Existing app contract for already calibrated values; this decoder runs locally.
     func isWebOOPEnabled() -> Bool { true }
     func nonWebOOPAllowed() -> Bool { false }
@@ -329,7 +328,6 @@ final class CGMSibionicsTransmitter: BluetoothTransmitter, CGMTransmitter {
             let advanced = session.nextIndex > oldIndex
             pacing.receivedDataFrame(at: monotonicNow, advanced: advanced)
             if advanced { retries = 0 }
-            updateExtendedReading(session.extendedReading(at: Date()), start: session.start, authorization: authorization)
             trace("GS1 accepted samples=%{public}d nextIndex=%{public}d historyReady=%{public}@ published=%{public}d", log: statusLog, category: ConstantsLog.categoryBlueToothTransmitter, type: .info, samples.count, session.nextIndex, session.historyReady.description, readings.count)
             setStatus(session.historyReady ? session.lastStatus : "Downloading GS1 history: minute \(session.nextIndex)")
             publish(readings, observation: session.liveObservation(at: Date()))
@@ -347,17 +345,23 @@ final class CGMSibionicsTransmitter: BluetoothTransmitter, CGMTransmitter {
     func publish(_ readings: [GS1Session.Reading], observation: GS1Session.Observation?) {
         guard let observation, let token = delivery.token() else { return }
         DispatchQueue.main.async { [weak self] in
-            guard let self, self.delivery.allows(token) else { return }
-            let now = Date()
-            guard observation.isCurrent(at: now) else { return }
+            guard let self else { return }
+            let expectedIdentity = self.configuredIdentity.flatMap { identity in self.selectedUUID.map { identity.checkpointIdentity(peripheralID: $0) } }
+            guard observation.identity == nil || observation.identity == expectedIdentity else { return }
+            let isCurrent = { self.delivery.allows(token) && observation.isCurrent(at: Date()) }
+            guard isCurrent() else { return }
             self.cgmDelegate?.sensorSessionObserved(startDate: observation.start, from: self)
+            guard isCurrent() else { return }
             self.bluetoothTransmitterDelegate?.heartBeat()
-            let current = readings.filter { now.timeIntervalSince($0.date) >= 0 && now.timeIntervalSince($0.date) <= 120 }
+            guard isCurrent() else { return }
+            let now = Date()
+            let current = readings.filter { observation.allows($0, at: now) }
             guard let latestDate = current.map(\.date).max() else { return }
             var glucose = current.sorted { $0.date > $1.date }.map { GlucoseData(timeStamp: $0.date, glucoseLevelRaw: $0.mgdl) }
-            // The coordinator reconstructs start as latest reading date minus age.
-            // Use that same event time so BLE/dispatch latency cannot shift the start.
-            self.cgmDelegate?.cgmTransmitterInfoReceived(glucoseData: &glucose, transmitterBatteryInfo: nil, sensorAge: latestDate.timeIntervalSince(observation.start))
+            // Keep the physical session anchor when the coordinator reconstructs start.
+            guard isCurrent() else { return }
+            self.cgmDelegate?.cgmTransmitterInfoReceived(glucoseData: &glucose, transmitterBatteryInfo: nil,
+                                                       sensorAge: latestDate.timeIntervalSince(observation.start))
         }
     }
     private func isCurrent(_ peripheral: CBPeripheral) -> Bool {
@@ -365,7 +369,6 @@ final class CGMSibionicsTransmitter: BluetoothTransmitter, CGMTransmitter {
     }
     private func resetTransport() {
         watchdog?.cancel(); watchdog = nil; delivery.invalidate()
-        extendedReadingStore.update(nil)
         deviceInformation = ["connectionStartedAtUnix": Date().timeIntervalSince1970.description]
         deviceInformationValues.removeAll()
         statusLock.lock(); detectedMAC = nil; statusLock.unlock()
@@ -374,8 +377,6 @@ final class CGMSibionicsTransmitter: BluetoothTransmitter, CGMTransmitter {
     }
     private func retryResponse(_ message: String) {
         guard canOperate else { return }
-        extendedReadingStore.update(nil)
-        session?.discardExtendedReading()
         waitingForWriteCapacity = false
         pacing.rejectStream(at: ProcessInfo.processInfo.systemUptime)
         retries += 1; setStatus(message)
@@ -442,8 +443,6 @@ final class CGMSibionicsTransmitter: BluetoothTransmitter, CGMTransmitter {
     }
     private func halt(_ message: String) {
         delivery.stop(); watchdog?.cancel(); assembler.reset(); pacing = GS1StreamPacing()
-        extendedReadingStore.update(nil)
-        session?.discardExtendedReading()
         setStatus(message); stopScanning(); disconnect()
         DispatchQueue.main.async { [weak self] in
             guard let self, !self.delivery.isReleased else { return }
@@ -452,7 +451,6 @@ final class CGMSibionicsTransmitter: BluetoothTransmitter, CGMTransmitter {
     }
     override func prepareForRelease() {
         delivery.release()
-        extendedReadingStore.update(nil)
         runOnCentralQueue { [weak self] in self?.resetTransport() }
         super.prepareForRelease()
     }

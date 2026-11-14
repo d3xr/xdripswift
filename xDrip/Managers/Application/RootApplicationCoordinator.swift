@@ -1183,6 +1183,25 @@ import AppIntents
         return confirmed.map(\.id)
     }
 
+    /// Configure the ingestion path without starting the app's optional network services.
+    func configureGlucosePipeline(coreDataManager: CoreDataManager,
+                                  bluetoothPeripheralManager: BluetoothPeripheralManager,
+                                  loopManager: LoopManager?, alertManager: AlertManager?) {
+        self.coreDataManager = coreDataManager
+        self.bluetoothPeripheralManager = bluetoothPeripheralManager
+        self.loopManager = loopManager
+        self.alertManager = alertManager
+        bgReadingsAccessor = BgReadingsAccessor(coreDataManager: coreDataManager)
+        calibrationsAccessor = CalibrationsAccessor(coreDataManager: coreDataManager)
+        treatmentEntryAccessor = TreatmentEntryAccessor(coreDataManager: coreDataManager)
+        bgPostProcessingManager = BgPostProcessingManager(coreDataManager: coreDataManager,
+                                                         nightscoutSyncManager: nil, healthKitManager: nil)
+        activeSensor = SensorsAccessor(coreDataManager: coreDataManager).fetchActiveSensor()
+        if let transmitter = bluetoothPeripheralManager.getCGMTransmitter() {
+            calibrator = getCalibrator(cgmTransmitter: transmitter)
+        }
+    }
+
     /// process new glucose data received from transmitter.
     /// - parameters:
     ///     - glucoseData : array with new readings
@@ -3104,6 +3123,14 @@ extension RootApplicationCoordinator: @preconcurrency CGMTransmitterDelegate {
                   currentTransmitter: bluetoothPeripheralManager?.getCGMTransmitter(), coreDataManager: coreDataManager) else { return }
         loopManager?.shareMetadata(lastCommunicationAt: Date())
         updateLiveActivityAndWidgets(forceRestart: false, sensorStartDate: activeSensor?.startDate)
+    }
+
+    func sensorSessionConfigurationChanged(startDate: Date, from transmitter: CGMTransmitter) {
+        guard let current = bluetoothPeripheralManager?.getCGMTransmitter(), current === transmitter,
+              let activeSensor, abs(activeSensor.startDate.timeIntervalSince(startDate)) < 1 else { return }
+        updateDataSourceInfo(transmitter: transmitter)
+        loopManager?.shareMetadata()
+        updateLiveActivityAndWidgets(forceRestart: false, sensorStartDate: activeSensor.startDate)
     }
 
     @discardableResult

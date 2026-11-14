@@ -5,31 +5,33 @@ import GS1Native
 /// Factory 14-day GS1 CN only. Sensor index is minutes since the original session start.
 enum GS1Policy {
     static let warmup: TimeInterval = 60 * 60
-    static let lifetime: TimeInterval = 14 * 24 * 60 * 60
-    // JugglucoNG 11e6e29db7d9055c8fd2e96261812e16f2095f3d,
-    // SibionicsConstants.kt:15, CN AA55/V115G: software continuation bound only.
-    // It is not evidence of accuracy beyond the labelled 14 days.
-    static let diagnosticLifetime: TimeInterval = 34301 * 60
+    static let lifetimeMinutes = 14 * 24 * 60
+    static let lifetime = TimeInterval(lifetimeMinutes * 60)
+    // Community expected lifetime for CN AA55/V115G, pinned JugglucoNG
+    // SibionicsConstants.kt at 11e6e29. This is the selected extension profile.
+    static let extendedLifetimeMinutes = 34301
+    static let extendedLifetime = TimeInterval(extendedLifetimeMinutes * 60)
+    // The revision is part of the immutable journal digest, not the UI policy.
     static let revision = "GS1-CN-AA55:11e6e29:115G:1"
-    static func mayPublish(index: Int, timestamp: Date, start: Date, now: Date, live: Bool, confirmed: Bool) -> Bool {
-        let age = timestamp.timeIntervalSince(start), freshness = now.timeIntervalSince(timestamp)
-        return confirmed && live && index >= 60 && index < 20160 && age >= warmup && age < lifetime && freshness >= 0 && freshness <= 120
-    }
-    static func mayInspectExtended(index: Int, timestamp: Date, start: Date, now: Date, live: Bool, confirmed: Bool) -> Bool {
-        let age = timestamp.timeIntervalSince(start), freshness = now.timeIntervalSince(timestamp)
-        return confirmed && live && index >= 20160 && index < 34301
-            && age >= lifetime && age < diagnosticLifetime && now.timeIntervalSince(start) < diagnosticLifetime
-            && freshness >= 0 && freshness <= 120
+    static func mayPublish(index: Int, timestamp: Date, start: Date, now: Date, live: Bool, confirmed: Bool,
+                           extended: Bool = false) -> Bool {
+        let age = timestamp.timeIntervalSince(start), currentAge = now.timeIntervalSince(start)
+        let freshness = now.timeIntervalSince(timestamp)
+        guard confirmed, live, index >= 60, age >= warmup,
+              freshness >= 0, freshness <= 120 else { return false }
+        if index < lifetimeMinutes, age < lifetime, currentAge < lifetime { return true }
+        return extended && index >= lifetimeMinutes && index < extendedLifetimeMinutes
+            && age >= lifetime && age < extendedLifetime && currentAge < extendedLifetime
     }
 }
 
 /// Consent belongs to the full code/MAC/Bluetooth identity. A changed switch invalidates
-/// already queued diagnostic results, including a quick off/on cycle.
+/// already queued extended readings, including a quick off/on cycle.
 enum GS1ExtendedReadingConsent {
     struct Token: Equatable { let identity: String; let generation: UInt64 }
     private static let lock = NSLock()
     private static var generations: [String: UInt64] = [:]
-    private static func key(_ identity: String) -> String { "gs1_extended_readings_" + GS1Journal.hash(Data(identity.utf8)) }
+    private static func key(_ identity: String) -> String { "gs1_extended_glucose_v1_" + GS1Journal.hash(Data(identity.utf8)) }
     static func isEnabled(_ identity: String) -> Bool {
         lock.lock(); defer { lock.unlock() }
         return UserDefaults.standard.bool(forKey: key(identity))
@@ -51,20 +53,6 @@ enum GS1ExtendedReadingConsent {
     }
 }
 
-/// The diagnostic value never enters GlucoseData, Core Data glucose, or an export.
-final class GS1ExtendedReadingStore {
-    struct Value { let reading: GS1Session.Reading; let start: Date; let authorization: GS1ExtendedReadingConsent.Token }
-    private let lock = NSLock()
-    private var value: Value?
-    func update(_ value: Value?) { lock.lock(); self.value = value; lock.unlock() }
-    func current(at now: Date = Date()) -> Value? {
-        lock.lock(); defer { lock.unlock() }
-        guard let value, GS1ExtendedReadingConsent.allows(value.authorization),
-              GS1Policy.mayInspectExtended(index: value.reading.index, timestamp: value.reading.date,
-                start: value.start, now: now, live: true, confirmed: true) else { self.value = nil; return nil }
-        return value
-    }
-}
 
 enum GS1SessionError: Error { case journal, checkpoint, conflictingSample, timeline, decoder, persistence }
 
@@ -170,13 +158,33 @@ final class GS1Session {
     struct Observation {
         let start: Date
         let latestSampleDate: Date
+        let identity: String?
+        let authorization: GS1ExtendedReadingConsent.Token?
 
+        init(start: Date, latestSampleDate: Date, identity: String? = nil,
+             authorization: GS1ExtendedReadingConsent.Token? = nil) {
+            self.start = start; self.latestSampleDate = latestSampleDate
+            self.identity = identity; self.authorization = authorization
+        }
+        var extensionIsAuthorized: Bool {
+            guard let identity, let authorization, authorization.identity == identity else { return false }
+            return GS1ExtendedReadingConsent.allows(authorization)
+        }
+        var maximumIndex: Int { extensionIsAuthorized ? GS1Policy.extendedLifetimeMinutes : GS1Policy.lifetimeMinutes }
         func isCurrent(at now: Date) -> Bool {
+            if authorization != nil && !extensionIsAuthorized { return false }
             let age = now.timeIntervalSince(start), freshness = now.timeIntervalSince(latestSampleDate)
-            return age.isFinite && age >= 0 && age < GS1Policy.lifetime
+            let limit = extensionIsAuthorized ? GS1Policy.extendedLifetime : GS1Policy.lifetime
+            return age.isFinite && age >= 0 && age < limit
                 && freshness.isFinite && freshness >= 0 && freshness <= 120
         }
+        func allows(_ reading: Reading, at now: Date) -> Bool {
+            guard isCurrent(at: now), reading.mgdl.isFinite, reading.mgdl > 0, reading.mgdl <= 900 else { return false }
+            return GS1Policy.mayPublish(index: reading.index, timestamp: reading.date, start: start, now: now,
+                                       live: true, confirmed: true, extended: extensionIsAuthorized)
+        }
     }
+
     let identity: String
     let journal: GS1Journal
     private var engine: GS1V115GEngine
@@ -185,8 +193,7 @@ final class GS1Session {
     // are not carried across packets or promoted when a later raw tail arrives.
     private(set) var baselineTailIndex: Int?
     private var lastPublishedIndex = 0
-    private var diagnosticReading: Reading?
-    private var diagnosticAuthorization: GS1ExtendedReadingConsent.Token?
+    private var publicationAuthorization: GS1ExtendedReadingConsent.Token?
     private(set) var start: Date?
     private(set) var startConfirmed = false
     private(set) var historyReady = false
@@ -198,19 +205,13 @@ final class GS1Session {
     /// Warm-up has no publishable glucose, but a caught-up history can already prove
     /// the original session start. Restoring a checkpoint alone cannot prove contact.
     func liveObservation(at now: Date) -> Observation? {
-        guard !checkpointFailed, startConfirmed, historyReady, let start, let latest = journal.records.last, latest.index < 20160 else { return nil }
-        let observation = Observation(start: start, latestSampleDate: latest.timestamp)
+        guard !checkpointFailed, startConfirmed, historyReady, let start, let latest = journal.records.last else { return nil }
+        let needsExtension = latest.index >= GS1Policy.lifetimeMinutes || now.timeIntervalSince(start) >= GS1Policy.lifetime
+        let observation = Observation(start: start, latestSampleDate: latest.timestamp,
+                                      identity: identity, authorization: needsExtension ? publicationAuthorization : nil)
+        guard latest.index < observation.maximumIndex else { return nil }
         return observation.isCurrent(at: now) ? observation : nil
     }
-
-    func extendedReading(at now: Date) -> Reading? {
-        guard !checkpointFailed, let authorization = diagnosticAuthorization, GS1ExtendedReadingConsent.allows(authorization),
-              let reading = diagnosticReading, let start,
-              GS1Policy.mayInspectExtended(index: reading.index, timestamp: reading.date, start: start,
-                now: now, live: historyReady, confirmed: startConfirmed) else { return nil }
-        return reading
-    }
-    func discardExtendedReading() { diagnosticReading = nil }
 
     init(identity: String, sensitivity: Float, storage: URL) throws {
         self.identity = identity
@@ -238,14 +239,9 @@ final class GS1Session {
     func ingest(_ samples: [GS1RawSample], received: Date, now: Date, extendedAuthorization: GS1ExtendedReadingConsent.Token? = nil, nativeStatus: ((Int, String) -> Void)? = nil) throws -> [Reading] {
         guard !checkpointFailed else { throw GS1SessionError.checkpoint }
         timelineIssue = nil
-        // A consent change invalidates the diagnostic observation. Candidates are
-        // local to this batch and cannot inherit a later consent generation.
-        if diagnosticAuthorization != extendedAuthorization {
-            diagnosticReading = nil
-            diagnosticAuthorization = extendedAuthorization
-        }
-        let inspectExtended = extendedAuthorization.map { $0.identity == identity && GS1ExtendedReadingConsent.allows($0) } ?? false
-        if !inspectExtended { diagnosticReading = nil }
+        // Capture this batch's permission. A later off/on cannot authorize its queued result.
+        publicationAuthorization = extendedAuthorization
+        let extendSession = extendedAuthorization.map { $0.identity == identity && GS1ExtendedReadingConsent.allows($0) } ?? false
         guard received.timeIntervalSince1970.isFinite, now.timeIntervalSince1970.isFinite,
               received.timeIntervalSince(now) <= 5, received.timeIntervalSince1970 > 946_684_800 else {
             timelineIssue = .invalidClock
@@ -293,26 +289,21 @@ final class GS1Session {
         }
         if let start, historyReady {
             let age = now.timeIntervalSince(start)
-            lastStatus = age < GS1Policy.warmup ? "Warming up: \(max(0, Int(ceil((GS1Policy.warmup-age)/60)))) min" : (age >= GS1Policy.lifetime ? (inspectExtended && age < GS1Policy.diagnosticLifetime ? "Past 14 days; experimental readings in device details only" : "14-day sensor session ended") : "Connected; waiting for the next final reading")
+            lastStatus = age < GS1Policy.warmup ? "Warming up: \(max(0, Int(ceil((GS1Policy.warmup-age)/60)))) min" : (age >= GS1Policy.lifetime ? (extendSession && age < GS1Policy.extendedLifetime ? "Extended session — testing" : "Sensor session reading limit reached") : "Connected; waiting for the next final reading")
         }
         guard advanced, historyReady, let tail = newTail, tail.index == nextIndex - 1 else { return [] }
         guard let baseline = baselineTailIndex else {
             baselineTailIndex = tail.index
-            if let start, now.timeIntervalSince(start) >= GS1Policy.warmup, now.timeIntervalSince(start) < GS1Policy.lifetime {
+            if let start, now.timeIntervalSince(start) >= GS1Policy.warmup, now.timeIntervalSince(start) < (extendSession ? GS1Policy.extendedLifetime : GS1Policy.lifetime) {
                 lastStatus = "History ready; waiting for the next live final reading"
             }
             return []
         }
         guard let reading = tailCorrection, reading.index == tail.index,
               reading.index > baseline, reading.index > lastPublishedIndex, let start else { return [] }
-        if inspectExtended, GS1Policy.mayInspectExtended(index: reading.index, timestamp: reading.date, start: start,
-            now: now, live: true, confirmed: startConfirmed) {
-            diagnosticReading = reading
-            lastPublishedIndex = reading.index
-            return []
-        }
+        let authorizedNow = extendedAuthorization.map { $0.identity == identity && GS1ExtendedReadingConsent.allows($0) } ?? false
         guard GS1Policy.mayPublish(index: reading.index, timestamp: reading.date, start: start, now: now,
-                                  live: true, confirmed: startConfirmed) else { return [] }
+                                  live: true, confirmed: startConfirmed, extended: authorizedNow) else { return [] }
         lastPublishedIndex = reading.index
         return [reading]
     }
