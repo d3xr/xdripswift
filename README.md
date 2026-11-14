@@ -1,27 +1,41 @@
 # xDrip+ for iOS
 
-[Русская версия](README.ru.md) · [Branches and upstream baseline](docs/branches.md)
+[Русская версия](README.ru.md)
 
-Custom **xDrip4iOS 7.2.1 / build 4247**, integrating Ottai CN/Global/Syai, Sibionics GS1 CN, AiDex/LinX/LumiFlex and ordinary glucose sharing with Trio. This is an iOS project; it does not use the Android xDrip+ codebase or Android signing keystores.
+Read glucose from CGM sensors over Bluetooth and share it with Trio. This fork extends [xDrip4iOS](https://github.com/JohanDegraeve/xdripswift) with Ottai/Syai, Sibionics GS1 CN and AiDex/LinX/LumiFlex support.
 
-Use **`custom-build`**, the default branch, for the complete integration. The other four branches track upstream or preserve heads of open upstream pull requests. Eleven obsolete remote branches have been retired; see the branch guide.
+Use the default **`custom-build`** branch to build the complete app.
 
-## Features and verification limits
+## What this fork adds
 
-| Area | Implemented | Verification limit |
-|---|---|---|
-| Ottai CN/Global | New-sensor BLE preparation and activation, regional cloud credentials and factory parameters; a requested total lifetime of up to 30 days with exact read-back | First physical activation with this version has not been tested; an account, internet access and a supported firmware profile are required |
-| Active Ottai | Manual request for a total lifetime of 30 days from the original start, followed by exact read-back and a fresh status-3 check | A stored parameter does not prove that firmware changes its deadline or continues measuring beyond the previous expiry |
-| CN/Syai NFC reader | Explicit passive ISO14443 RF session; no proprietary tag commands or automatic BLE activation | Requires an NFC TAG entitlement; reader readiness/tag detection does not prove identity or physical wake |
-| Syai | Existing server-assisted activation flow retained | An opaque server-defined duration is not claimed as verified 30-day support |
-| GS1 CN AA55/V115G | Direct BLE, a persistent history journal, local native calculation and new final corrections shared with Trio | Reading an already running GS1 has been verified; a new sensor's physical first start has not |
-| GS1 after day 14 | Optional final-correction diagnostics in a separate device card, strictly before 23 days 19 hours 41 minutes from the original start | Disabled by default; excluded from ordinary glucose, alerts and Trio. This does not reset or extend firmware lifetime |
+| Sensors | Added functionality |
+|---|---|
+| **Ottai CN and Global** | Bluetooth readings, account login, preparation and activation of supported new sensors from inside xDrip, and controls for requesting a longer lifetime |
+| **Syai** | Bluetooth readings and activation using a manufacturer account |
+| **Sibionics GS1 CN** | Direct Bluetooth readings, local glucose calculation, history recovery and sharing with Trio |
+| **AiDex X, LinX and LumiFlex** | Bluetooth drivers with sensor identification, warm-up and glucose-data handling |
 
-The repository includes the **full NFC-enabled profile**. Personal signing settings and Personal Team limitations belong in ignored local overrides. Obtaining a suitable NFC-enabled signing profile requires a rebuild, not a new NFC implementation.
+The integration also preserves the original sensor start time and history during GS1 recovery and fixes the widget displaying sample glucose instead of current readings.
 
-## Build with your own Apple signing identity
+### Ottai activation and lifetime
 
-Verified environment: **Apple Silicon Mac, Xcode 27.0 / SDK 27.0**, and Python 3. The included GS1 XCFramework provides ARM64 device and Simulator slices; an Intel x86_64 Simulator slice is not included. A normal app build does not require Kotlin, JVM, CocoaPods or rebuilding the native core.
+For a supported **new Ottai CN or Global sensor**, xDrip provides its own preparation and activation flow. A manufacturer account and internet access are still required. A sleeping CN sensor also needs an NFC wake, either from xDrip with suitable signing or from an external reader.
+
+At first activation, the app requests **up to 30 days total**. It reads the lifetime setting back from the sensor and checks the result before continuing with activation. An explicitly rejected request may fall back to a shorter supported duration.
+
+For an **already active Ottai CN or Global**, the device card offers **Request 30 days total**. The request keeps the original start time and history. It does not give the sensor another 30 days or start a new session. The app reads back the setting and checks that the sensor remains active.
+
+**A confirmed setting does not prove that the sensor will keep measuring beyond its original expiry.** Physical first activation and long-term extension with this implementation still require hardware testing. Syai uses its manufacturer-defined activation duration; these 30-day controls apply to Ottai CN and Global.
+
+### GS1 and Trio
+
+GS1 CN readings are calculated locally using the included native library. Reading an already running GS1 and sharing its glucose with Trio have been checked on an iPhone. Support is limited to the Chinese AA55/V115G variant.
+
+An optional experimental mode shows limited diagnostics after the normal 14-day period. Those values stay in the device card and are excluded from the main glucose graph, alerts and Trio. This mode does not restart the sensor.
+
+## Build with your own signing
+
+The build has been checked on an Apple silicon Mac with Xcode 27. Python 3 is required by the build script. The included GS1 library supports ARM64 iPhone builds and the Apple silicon Simulator; a normal app build does not require Kotlin or rebuilding that library.
 
 ```sh
 git clone --branch custom-build https://github.com/d3xr/xdrip-plus.git xdrip-plus
@@ -29,45 +43,42 @@ cd xdrip-plus
 cp xDripConfigOverride.xcconfig.example xDripConfigOverride.xcconfig
 ```
 
-Set your own `XDRIP_DEVELOPMENT_TEAM` in the local override. Configure provisioning for the app and extensions, including HealthKit, App Groups and NFC TAG on the main target. Direct sharing with Trio requires compatible signing and App Groups; matching another Team's group name does not grant access to its container. Never commit private signing keys or provisioning files.
+Set your Apple Developer Team in the local `xDripConfigOverride.xcconfig`:
+
+```text
+XDRIP_DEVELOPMENT_TEAM = YOURTEAMID
+```
+
+Open `xdrip.xcworkspace`, select the `xdrip` scheme and configure signing for the app and its extensions. The main app uses HealthKit, App Groups and NFC tag reading. Sharing with your Trio installation requires compatible signing and App Groups.
+
+You can build in Xcode or run:
 
 ```sh
 export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
 bash scripts/build-local.sh
 ```
 
-The script builds a Debug `.app`, verifies its signature and prints the package path. It does not install the app or start a sensor. Alternatively, open `xdrip.xcworkspace` and select the `xdrip` scheme.
+The script builds a signed `.app` and prints its location. Installation is a separate step. Keep your signing keys, provisioning files and local override out of Git.
 
-For a Personal Team, copy `docs/signing/PersonalTeam.entitlements.example` to the ignored root `xDripPersonalTeam.entitlements`, then use `docs/signing/PersonalTeam.xcconfig.example` as your root `xDripConfigOverride.xcconfig` and set your Team. This disables NFC while retaining BLE preparation and lifetime logic. A sleeping CN/Syai then needs an external NFC wake; the investigated Global profile uses BLE without that step.
+**Personal Team:** use the [local signing profile](docs/build-profiles.md#локальный-personal-team). It leaves NFC disabled while retaining Bluetooth and lifetime controls. To use NFC from xDrip, sign with a profile that permits NFC tag reading.
 
-## Branches and baseline
+## Connect a sensor
 
-The integration includes upstream **xDrip4iOS 7.2.1 / 4235** through [`f7447f1`](https://github.com/JohanDegraeve/xdripswift/tree/f7447f1c70a194cee1c9c8eea96ebbadf62027b8). Our custom build number is **4247**. The original custom snapshot was based on 7.2.0 / 4234; the 13 subsequent upstream commits are now merged, including alarm-interruption recovery, expiry-reminder rearming, Live Activity renewal and adjustment guardrails.
+1. Open **Devices**, add the matching sensor type and enter its code or account details.
+2. Connect an already active sensor to read it. For a new Ottai, sign in to the correct regional account, wake the sensor if necessary, connect and select **Start / activate sensor**.
+3. Open **Settings → OS-AID Share → Share with OS-AID** and select **Trio** to share normal glucose readings with your compatible Trio installation.
 
-Ottai/Syai derives from [PR #736](https://github.com/JohanDegraeve/xdripswift/pull/736); AiDex/LinX/LumiFlex derives from [PR #740](https://github.com/JohanDegraeve/xdripswift/pull/740). GS1 uses the pinned community native core and corresponding source included in `Vendor/GS1Native`. [Sync details and retained branch work](docs/upstream-sync-7.2.1.md) describe the integration boundaries and the portable GS1 rebuild helper recovered from the retired combined-CGM branch.
+New-sensor activation, NFC wake, operation beyond the original expiry and AiDex-family hardware coverage still need further device testing. Automated tests check software behavior; they do not establish physical sensor performance.
 
-## Documentation
+## Technical documentation
 
-- [Branch guide and retained pull requests](docs/branches.md) — English.
-- [7.2.1 sync and branch audit](docs/upstream-sync-7.2.1.md) — English.
-- [Full technical handoff, sensor flows and build instructions](docs/developer-handoff-4246.md) — Russian.
-- [Files changed in the last 4246 implementation stage](docs/changes-4246.md) — Russian; not the full diff from upstream.
-- [Full and Personal Team signing profiles](docs/build-profiles.md) — Russian.
-- [Ottai activation protocol](docs/ottai-activation.md) — Russian.
-- [Public snapshot contents](docs/public-snapshot.md) — Russian.
-- [GS1 native source, rebuilding and notices](Vendor/GS1Native/README.md).
-- [Upstream documentation](https://xdrip4ios.readthedocs.io/en/latest/).
+- [Signing profiles and capabilities](docs/build-profiles.md)
+- [Ottai activation and lifetime behavior](docs/ottai-activation.md)
+- [GS1 native library, source and rebuilding](Vendor/GS1Native/README.md)
+- [Upstream user guide](https://xdrip4ios.readthedocs.io/en/latest/)
 
-## Tests and evidence
+## Credits and license
 
-The 7.2.1 sync regression run selected **626 XCTest cases: 624 passed, one private GS1 replay case was skipped, and one upstream Libre3 diagnostic-log test failed**. The same Libre3 failure was reproduced in unmodified upstream 7.2.1 on the same Simulator/SDK. The new CGM adjustment and fractional-date regressions passed, along with the selected CGM, migration, alarm and expiry tests. Five Python safety tests for the optional rebuild helper also passed. This is not the complete upstream test suite; see [verification details](docs/upstream-sync-7.2.1.md#verification-scope).
+Built on xDrip4iOS, incorporating the community [Ottai/Syai](https://github.com/JohanDegraeve/xdripswift/pull/736) and [AiDex/LinX](https://github.com/JohanDegraeve/xdripswift/pull/740) integrations. GS1 calculation derives from JugglucoNG; its corresponding source and [notices](Vendor/GS1Native/NOTICE.md) are included.
 
-The skipped replay case requires personal input deliberately excluded from the repository. The previous 4246 prepared test environment passed all 313 selected cases, including 43 tests added at that implementation stage.
-
-Simulator tests and synthetic HTTP/transport ports verify software behavior. They do not establish real BLE/NFC behavior, first physical activation, measurement accuracy or firmware lifetime extension. ACK, duration read-back and fresh measurements after the previous deadline are separate evidence levels.
-
-## Language and licensing
-
-English is the primary repository documentation language. The app's development language is also English; available translations follow iOS language selection. The build does not force Russian. Detailed Russian documents are retained alongside this English entry point.
-
-The project inherits xDrip4iOS's [GPLv3 license](LICENSE). Ottai/JugglucoNG attribution is retained in source; GS1's [NOTICE](Vendor/GS1Native/NOTICE.md), licenses and corresponding source are included. The GS1 core is community reverse engineering, not an official manufacturer SDK.
+The project is distributed under [GPLv3](LICENSE). The GS1 core is community reverse engineering, not an official manufacturer SDK.
